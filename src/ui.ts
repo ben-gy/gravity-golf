@@ -9,7 +9,7 @@ import type { RaceStanding } from './game/race';
 export const FOOTER_HTML = `
   <footer class="site-footer">
     Built by <a href="https://benrichardson.dev/" target="_blank" rel="noopener">benrichardson.dev</a>
-    · <a href="https://sites.benrichardson.dev" target="_blank" rel="noopener">more games, tools &amp; sites</a>
+    · <a href="https://hub.benrichardson.dev" target="_blank" rel="noopener">more games, tools &amp; sites</a>
   </footer>`;
 
 export function esc(s: string): string {

@@ -19,6 +19,14 @@
   box-sizing: border-box;
 }
 
+/* The `hidden` attribute must always win — several elements (.game-overlay,
+ * .race-strip) set `display` in their own rules, which would otherwise override
+ * the UA `[hidden] { display: none }` in browsers that don't mark it !important
+ * (e.g. Safari), leaving an invisible blur/overlay on top that eats taps. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
