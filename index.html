@@ -8,7 +8,21 @@
     <meta property="og:title" content="Gravity Golf" />
     <meta property="og:description" content="Slingshot your ball through a field of planets — bend it around gravity into the hole. Solo, async seed-share, or live P2P race." />
     <meta property="og:type" content="website" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+
+    <!-- Home-screen install. Every href here is RELATIVE: the game is served from
+         a project subpath in dev and from its own domain in prod, and a leading
+         slash resolves to the wrong origin root in the first case. -->
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <meta name="theme-color" content="#0a0e1a" />
+    <!-- iOS ignores the manifest's icons entirely, and composites a transparent
+         icon onto BLACK — hence a separate, fully opaque, full-bleed 180x180. -->
+    <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Gravity Golf" />
+    <meta name="mobile-web-app-capable" content="yes" />
+
     <title>Gravity Golf</title>
     <script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "ba2bab2193ba42c1bea3d6714fcd0e28"}'></script>
   </head>

@@ -57,6 +57,31 @@ export function mintCode(): string {
   return out;
 }
 
+/** Push a chosen room code into the URL so the invite link + a refresh both work. */
+export function setRoomInUrl(roomCode: string): void {
+  const url = new URL(location.href);
+  url.searchParams.set('room', roomCode);
+  // A ?seed= course link and a room are different ways to play — never both.
+  url.searchParams.delete('seed');
+  url.hash = '';
+  history.replaceState(null, '', url.toString());
+}
+
+/**
+ * Drop ?room= on the way out of a room. Without this the code outlives the
+ * session: reopen the page — from history, or a home-screen icon — and the stale
+ * parameter drags you straight back into a room you have left, with no way to
+ * start a fresh one. "It always spawns the same game room no matter what."
+ * A ?seed= course link is left alone — it is still replayable.
+ */
+export function clearRoomInUrl(): void {
+  const url = new URL(location.href);
+  if (!url.searchParams.has('room')) return;
+  url.searchParams.delete('room');
+  url.hash = '';
+  history.replaceState(null, '', url.toString());
+}
+
 export function inviteLink(roomCode: string): string {
   const url = new URL(location.href);
   url.searchParams.set('room', roomCode);
@@ -140,7 +165,9 @@ export function createLobby(config: LobbyConfig): { destroy: () => void } {
   // travel the identical code path — including the frozen roster.
   function players(): LobbyPlayer[] {
     const s = rounds.state();
-    const host = net.host();
+    // Null until the room settles. Painting a host badge before then is how both
+    // players ended up looking like the host of a room that never connected.
+    const host = net.hostSettled() ? net.host() : null;
     const ready = new Set(s.votes.map((v) => v.id));
     return s.present
       .map((p) => ({
@@ -187,7 +214,9 @@ export function createLobby(config: LobbyConfig): { destroy: () => void } {
     }
   }
 
-  /** Unchanged gate: every non-host has readied up, and we have a full grid. */
+  /** Unchanged gate: every non-host has readied up, and we have a full grid.
+   *  net.isHost() is false until the room settles, so this cannot fire on a mesh
+   *  that has not formed. */
   function canStart(): boolean {
     const ps = players();
     return net.isHost() && ps.length >= minPlayers && ps.every((p) => p.ready || p.isHost);
@@ -209,7 +238,7 @@ export function createLobby(config: LobbyConfig): { destroy: () => void } {
   function render(): void {
     if (rounds.state().phase === 'playing') return;
     const ps = players();
-    const key = JSON.stringify([ps, canStart()]);
+    const key = JSON.stringify([ps, canStart(), net.hostSettled()]);
     if (key === painted) return;
     painted = key;
     const link = inviteLink(config.roomCode);
@@ -235,18 +264,26 @@ export function createLobby(config: LobbyConfig): { destroy: () => void } {
             .join('')}
         </ul>
         ${
-          ps.length < minPlayers
+          !net.hostSettled()
             ? `<div class="lobby-searching"><span class="spinner" aria-hidden="true"></span>
+                 <span>Connecting to the room…</span></div>`
+            : ps.length < minPlayers
+              ? `<div class="lobby-searching"><span class="spinner" aria-hidden="true"></span>
                  <span>Looking for ${minPlayers - ps.length} more player${minPlayers - ps.length === 1 ? '' : 's'}… share the room code or link</span></div>`
-            : ''
+              : ''
         }
         <div class="lobby-actions">
           ${
-            net.isHost()
-              ? `<button class="lobby-btn lobby-start" type="button" ${canStart() ? '' : 'disabled'}>
+            // Until the room settles we do not know who hosts, so we render
+            // neither the host's Start nor the guest's "waiting for the host" —
+            // both are lies about a mesh that has not formed yet.
+            !net.hostSettled()
+              ? `<button class="lobby-btn lobby-ready" type="button" disabled>I'm ready</button>`
+              : net.isHost()
+                ? `<button class="lobby-btn lobby-start" type="button" ${canStart() ? '' : 'disabled'}>
                    ${ps.length < minPlayers ? `Waiting for ${minPlayers - ps.length} more…` : 'Start race'}
                  </button>`
-              : `<button class="lobby-btn lobby-ready" type="button">${rounds.state().voted ? 'Not ready' : "I'm ready"}</button>
+                : `<button class="lobby-btn lobby-ready" type="button">${rounds.state().voted ? 'Not ready' : "I'm ready"}</button>
                  <p class="lobby-wait"><span class="spinner sm" aria-hidden="true"></span> Waiting for the host to start…</p>`
           }
         </div>
@@ -270,8 +307,12 @@ export function createLobby(config: LobbyConfig): { destroy: () => void } {
     const host = net.host();
     if (host !== lastHost) {
       const wasHost = lastHost === net.selfId;
+      const hadHost = lastHost !== null;
       lastHost = host;
-      if (net.isHost() && !wasHost) flash("The host left — you're the host now");
+      // `hadHost` matters: host() is null until the room settles, so without it
+      // the very first settle onto ourselves would announce a handover that never
+      // happened. Only a real incumbent leaving earns the message.
+      if (hadHost && net.isHost() && !wasHost) flash("The host left — you're the host now");
     }
   }, 600);
 

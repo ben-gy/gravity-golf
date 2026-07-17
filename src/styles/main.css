@@ -1,4 +1,8 @@
 :root {
+  /* mobile.css paints html with var(--bg, #0b1220); this game's palette is
+     --bg0, so without an alias the root would fall back to an off-palette blue
+     that peeks out behind the body gradient. Same colour as theme-color. */
+  --bg: #0a0e1a;
   --bg0: #0a0e1a;
   --bg1: #141b30;
   --panel: rgba(24, 33, 58, 0.72);
@@ -44,6 +48,11 @@ body {
 #app {
   min-height: 100vh;
   min-height: 100dvh;
+  /* mobile.css pads BODY by the safe-area insets, so a full-viewport #app inside
+     it overflows by exactly the notch + home-indicator height and the page gains
+     a scrollbar it never had. Subtract them back out. --vh is kept honest by
+     engine/mobile.ts and falls back to 1vh before the first measurement. */
+  min-height: calc(var(--vh) * 100 - env(safe-area-inset-top) - env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
 }

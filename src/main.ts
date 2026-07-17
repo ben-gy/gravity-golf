@@ -4,14 +4,22 @@
  * game → results / lobby flow for solo, async-seed, and live P2P race play.
  */
 
+import './styles/mobile.css';
 import './styles/main.css';
+import { hardenViewport } from './engine/mobile';
 import { createLoop, type Loop } from './engine/loop';
 import { createSfx } from './engine/sound';
 import { createStore } from './engine/storage';
 import { newSeed } from './engine/rng';
 import { createNet, type Net } from './engine/net';
 import { createRounds, type Rounds } from './engine/rematch';
-import { createLobby, createRoomEntry, roomCodeFromUrl } from './engine/lobby';
+import {
+  clearRoomInUrl,
+  createLobby,
+  createRoomEntry,
+  roomCodeFromUrl,
+  setRoomInUrl,
+} from './engine/lobby';
 import { generateCourse, DEFAULT_HOLES } from './game/course';
 import { GolfGame } from './game/golf';
 import { type Vec } from './game/physics';
@@ -36,6 +44,10 @@ const MAX_DRAG = 46; // world units for full power
 const POWER_SCALE = 1.7;
 const MIN_DRAG = 2.5; // deadzone
 const CELEBRATE_MS = 1.15; // seconds of sink celebration before advancing
+
+// Before anything renders: iOS ignores the viewport meta's user-scalable=no, so
+// a double-tap or a pinch will zoom a live course and there is no way back out.
+hardenViewport();
 
 const store = createStore(APP_ID);
 const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -127,6 +139,9 @@ function leaveRoom(): Promise<void> {
   netGame?.destroy();
   netGame = null;
   teardownGame();
+  // The room is over for us — take it out of the URL so a refresh, or reopening
+  // from the home-screen icon, lands on the menu instead of silently rejoining.
+  clearRoomInUrl();
   const leaving = net;
   net = null;
   // CHAIN, never replace. leaveRoom() runs again on the way into a new room, and
@@ -148,7 +163,6 @@ function bestLabel(): string {
 
 function showMenu(): void {
   void leaveRoom();
-  clearRoomFromUrl();
   shell(menuHTML(bestLabel(), holeCount));
   content.querySelector('#m-solo')?.addEventListener('click', () => {
     firstGestureUnlock();
@@ -207,8 +221,10 @@ function showRoomEntry(): void {
   shell(`<div class="screen entry" id="entry"></div>`);
   roomEntry = createRoomEntry({
     container: content.querySelector('#entry')!,
-    onCreate: (code) => void openRoom(code),
-    onJoin: (code) => void openRoom(code),
+    // Minting the code is the ONLY way to arrive as the host. Typing a friend's
+    // code walks into a room they already hold — see openRoom's claimHost.
+    onCreate: (code) => void openRoom(code, true),
+    onJoin: (code) => void openRoom(code, false),
     onBack: () => showMenu(),
   });
 }
@@ -218,21 +234,21 @@ function showRoomEntry(): void {
  * the first and every rematch — runs inside this one Net via `rounds`. Nothing
  * here may call net.leave() except the trip back to the menu.
  */
-async function openRoom(code: string): Promise<void> {
+async function openRoom(code: string, created: boolean): Promise<void> {
   leaveRoom();
   // A previous room may still be tearing down (Trystero defers it ~99ms).
   // Joining inside that window returns the dying room, so wait it out.
   await roomTeardown;
 
   // Put the room code in the URL so the invite link carries it.
-  const url = new URL(location.href);
-  url.searchParams.set('room', code);
-  url.searchParams.delete('seed');
-  history.replaceState(null, '', url.toString());
+  setRoomInUrl(code);
 
   try {
     net = createNet(
-      { appId: APP_ID, roomId: code },
+      // `created` is the difference between minting this code and walking into
+      // someone else's room. Only the minter may host on arrival; a guest waits
+      // to hear from the incumbent instead of racing it for the role.
+      { appId: APP_ID, roomId: code, claimHost: created },
       {
         onHostChange: (_id, isHost) => onHostChangeRoute(isHost),
         onPeerLeave: (id) => onPeerLeaveRoute(id),
@@ -270,15 +286,6 @@ function showLobby(code: string): void {
     minPlayers: 2,
     maxPlayers: 6,
   });
-}
-
-/** Drop ?room= so a refresh lands on the menu rather than re-joining a room we
- *  have left. A ?seed= course link is left alone — it is still replayable. */
-function clearRoomFromUrl(): void {
-  const url = new URL(location.href);
-  if (!url.searchParams.has('room')) return;
-  url.searchParams.delete('room');
-  history.replaceState(null, '', url.toString());
 }
 
 // ---- race ----
@@ -671,6 +678,16 @@ function showRaceResults(snap: RaceSnapshot): void {
 
   const againBtn = content.querySelector<HTMLButtonElement>('#r-again');
   const status = content.querySelector<HTMLElement>('.again-status');
+  const startNow = content.querySelector<HTMLButtonElement>('#r-start-now');
+
+  startNow?.addEventListener('click', () => rounds?.go());
+  content.querySelector('#r-lobby')?.addEventListener('click', () => {
+    // Back to the lobby WITHOUT leaving the room — the mesh and the roster all
+    // survive. From there you can wait, re-ready, or see who is still around,
+    // instead of the scorecard being a dead end with only "Back to menu".
+    rounds?.unvote();
+    showLobby(roomCodeFromUrl() ?? '');
+  });
 
   againBtn?.addEventListener('click', () => {
     // NOT a rejoin. The room and the whole peer mesh stay exactly as they are;
@@ -688,12 +705,26 @@ function showRaceResults(snap: RaceSnapshot): void {
     const s = rounds.state();
     againBtn.textContent = s.voted ? 'Ready — waiting…' : 'Play again';
     againBtn.classList.toggle('waiting', s.voted);
+
+    // The host never has to sit and hope: once enough people are in, it can
+    // start immediately rather than wait out the countdown.
+    if (startNow) startNow.hidden = !s.canStart || s.votes.length === s.present.length;
+
     const waiting = s.present.length - s.votes.length;
-    status.textContent = s.voted
-      ? waiting > 0
-        ? `Waiting for ${waiting} more player${waiting === 1 ? '' : 's'}…`
-        : 'Starting…'
-      : `${s.votes.length}/${s.present.length} ready for another round`;
+    const secs = s.startsInMs !== null ? Math.ceil(s.startsInMs / 1000) : null;
+    if (!s.voted) {
+      status.textContent = `${s.votes.length}/${s.present.length} ready for another round`;
+    } else if (secs !== null) {
+      // Say WHY we are still waiting and when it ends. A bare "waiting…" with no
+      // horizon is what made this feel like a hang.
+      status.textContent = `Starting in ${secs}s — waiting for ${waiting} more player${
+        waiting === 1 ? '' : 's'
+      }`;
+    } else if (waiting > 0) {
+      status.textContent = `Waiting for ${waiting} more player${waiting === 1 ? '' : 's'}…`;
+    } else {
+      status.textContent = 'Starting…';
+    }
   }
 
   paintAgain();
@@ -868,8 +899,9 @@ function boot(): void {
   window.addEventListener('beforeunload', () => net?.leave());
 
   if (roomParam) {
-    // Deep-linked invite — go straight to the lobby (consume the link once).
-    void openRoom(roomParam);
+    // Deep-linked invite — go straight to the lobby (consume the link once). We
+    // are the guest here, never the host: whoever sent the link already holds it.
+    void openRoom(roomParam, false);
     return;
   }
   if (seedParam) {

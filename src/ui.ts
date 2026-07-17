@@ -168,6 +168,8 @@ export function raceResultsHTML(standings: RaceStanding[], selfId: string, pars:
       <p class="card-key">Each cell is strokes on that hole; the small number in the header is its par.</p>
       <div class="menu-actions">
         <button class="btn primary" id="r-again">Play again</button>
+        <button class="btn" id="r-start-now" hidden>Start now</button>
+        <button class="btn" id="r-lobby">Back to lobby</button>
         <button class="btn" id="r-share">Share this course</button>
         <button class="btn ghost" id="r-menu">Back to menu</button>
       </div>

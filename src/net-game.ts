@@ -7,6 +7,13 @@
  * backgrounded tab — rAF would not) and broadcasts a 'snap'. On host loss the
  * survivor's onHostChange promotes it: it already holds the standings + clock,
  * resumes the keepalive, and can still end the round.
+ *
+ * There is exactly ONE answer to "who is host": engine/net.ts. The RaceSession
+ * carries its own hostFlag only so the race core stays testable without a Net —
+ * it is seeded from net.isHost() and thereafter moved ONLY by net's onHostChange,
+ * never re-derived here. That matters now that net.ts elects by incumbency: a
+ * mid-race joiner with a lower peer id no longer wins anything, so this must not
+ * quietly hold a second opinion and hand it authority.
  */
 
 import type { Net } from './engine/net';

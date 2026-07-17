@@ -27,6 +27,9 @@ function mockNet(selfId: PeerId, peers: PeerId[], isHost: boolean) {
     peers: () => roster,
     host: () => (isHost ? selfId : roster[0]),
     isHost: () => isHost,
+    // A race only ever starts from a settled room (see host-election.test.ts), so
+    // the NetGame never sees an unsettled Net.
+    hostSettled: () => true,
     count: () => roster.length,
     channel<T>(name: string, onReceive: (d: T, from: PeerId) => void) {
       if (!chans.has(name)) chans.set(name, new Set());
@@ -117,5 +120,77 @@ describe('NetGame teardown', () => {
     deliver('snap', snap, 'aaa');
 
     expect(g.session.over).toBe(false);
+  });
+});
+
+describe('NetGame authority follows the net, and only the net', () => {
+  it('seeds the race host from net.isHost() rather than re-deriving it', () => {
+    // 'zzz' sorts LAST but holds the room by incumbency (see host-election.test.ts).
+    // A NetGame that re-ran a min-id election here would hand authority to 'aaa'
+    // and the room would have two hosts ticking two clocks.
+    const { net } = mockNet('zzz', ['aaa'], true);
+    const g = new NetGame(net, cfg, noop);
+    expect(g.session.isHost()).toBe(true);
+  });
+
+  it('never lets a mid-race joiner take authority', () => {
+    vi.useFakeTimers();
+    try {
+      // We are a client. Someone joins mid-race; the roster grows, but net never
+      // says the host changed — so nothing here may promote us.
+      const { net, sent } = mockNet('aaa', ['zzz'], false);
+      const g = new NetGame(net, cfg, noop);
+      g.start();
+      g.onRoster(['aaa', 'zzz', 'mmm']);
+
+      vi.advanceTimersByTime(1000);
+      expect(g.session.isHost()).toBe(false);
+      // The tell-tale of a second host: snapshots on the wire from a client.
+      expect(sent.filter((m) => m.name === 'snap')).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('promotes the survivor when net hands the room over mid-race', () => {
+    vi.useFakeTimers();
+    try {
+      const { net, sent } = mockNet('aaa', ['zzz'], false);
+      let promoted = 0;
+      const g = new NetGame(net, cfg, { onSnapshot: () => {}, onHostPromoted: () => promoted++ });
+      g.start();
+      expect(sent.filter((m) => m.name === 'snap')).toHaveLength(0);
+
+      // The host left; net re-elected us. The race must carry on from the
+      // standings and clock we already hold, not stall with nobody ticking.
+      g.onHostChange(true);
+      vi.advanceTimersByTime(1000);
+
+      expect(promoted).toBe(1);
+      expect(g.session.isHost()).toBe(true);
+      expect(sent.filter((m) => m.name === 'snap').length).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stands down when net says it is no longer host', () => {
+    vi.useFakeTimers();
+    try {
+      const { net, sent } = mockNet('aaa', ['zzz'], true);
+      const g = new NetGame(net, cfg, noop);
+      g.start();
+      vi.advanceTimersByTime(700);
+      const before = sent.filter((m) => m.name === 'snap').length;
+      expect(before).toBeGreaterThan(0);
+
+      // Two peers converged onto one host (net.ts's __h exchange). The loser must
+      // go quiet, or both keep broadcasting conflicting clocks forever.
+      g.onHostChange(false);
+      vi.advanceTimersByTime(3000);
+      expect(sent.filter((m) => m.name === 'snap').length).toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
