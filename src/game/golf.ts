@@ -27,6 +27,8 @@ export interface Progress {
   strokes: number;
   holeStrokes: number;
   done: boolean;
+  /** Strokes on each hole completed so far, in order. */
+  holes: number[];
 }
 
 export interface UpdateEvents extends StepEvents {
@@ -107,6 +109,7 @@ export class GolfGame {
       strokes: this.totalStrokes,
       holeStrokes: this.holeStrokes,
       done: this.done,
+      holes: this.results.map((r) => r.strokes),
     };
   }
 

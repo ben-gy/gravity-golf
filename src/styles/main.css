@@ -747,6 +747,57 @@ body {
 .scorecard.race .rank {
   font-size: 16px;
 }
+/* The per-hole card is a grid of narrow columns, so it needs more room than the
+   solo card and stays scrollable on a phone rather than squeezing the cells. */
+.race-wrap {
+  max-width: min(760px, 100%);
+}
+.scorecard.race th,
+.scorecard.race td {
+  padding: 7px 6px;
+  white-space: nowrap;
+}
+.scorecard.race .hcol {
+  text-align: center;
+  padding: 7px 4px;
+}
+.scorecard.race .hcol.none {
+  color: var(--muted);
+}
+.scorecard.race .hnum {
+  display: block;
+}
+.scorecard.race .hpar {
+  display: block;
+  font-size: 10px;
+  font-weight: 500;
+  opacity: 0.65;
+}
+.scorecard.race .pname {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.scorecard.race .ptot,
+.scorecard.race .ppar {
+  font-weight: 700;
+  text-align: right;
+}
+.scorecard.race .dnf {
+  font-weight: 400;
+  color: var(--muted);
+  font-size: 11px;
+}
+.card-key {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+.again-status {
+  min-height: 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
 .scorecard .is-self {
   background: rgba(77, 208, 255, 0.08);
 }

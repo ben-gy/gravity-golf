@@ -16,7 +16,17 @@ export interface PeerProgress {
   strokes: number;
   holeStrokes: number;
   done: boolean;
-  finishedAt: number | null;
+  /** Strokes taken on each COMPLETED hole, in order. Drives the scorecard. */
+  holes: number[];
+  /**
+   * 1-based finish rank, assigned by the HOST when it first sees this peer
+   * report done — never by the peer itself. Peers stamped their own Date.now()
+   * and we compared those across machines to break stroke ties, which silently
+   * handed the win to whoever's wall clock ran slowest. Only the host's own
+   * arrival order is comparable, and the host already owns the clock and the
+   * snapshot. null until the host has seen the finish.
+   */
+  finishOrder: number | null;
 }
 
 export interface RaceStanding extends PeerProgress {
@@ -41,7 +51,7 @@ export interface RaceConfig {
 }
 
 export function emptyProgress(): PeerProgress {
-  return { hole: 0, strokes: 0, holeStrokes: 0, done: false, finishedAt: null };
+  return { hole: 0, strokes: 0, holeStrokes: 0, done: false, holes: [], finishOrder: null };
 }
 
 /** Ranking order: done-first, then further/fewer strokes, then earlier finish. */
@@ -49,7 +59,8 @@ export function compareStandings(a: PeerProgress, b: PeerProgress): number {
   if (a.done !== b.done) return a.done ? -1 : 1;
   if (a.done && b.done) {
     if (a.strokes !== b.strokes) return a.strokes - b.strokes;
-    return (a.finishedAt ?? Infinity) - (b.finishedAt ?? Infinity);
+    // Host-assigned order — see PeerProgress.finishOrder for why not a clock.
+    return (a.finishOrder ?? Infinity) - (b.finishOrder ?? Infinity);
   }
   // Neither done: further through the course wins, then fewer strokes.
   if (a.hole !== b.hole) return b.hole - a.hole;
@@ -63,6 +74,8 @@ export class RaceSession {
   private progress = new Map<string, PeerProgress>();
   private names = new Map<string, string>();
   private connected = new Set<string>();
+  /** Highest finish rank handed out so far. Host-owned; adopted on promotion. */
+  private finishSeq = 0;
   remainingMs: number;
   over = false;
 
@@ -92,14 +105,30 @@ export class RaceSession {
     }
   }
 
-  /** Record another peer's (or our own) progress. */
+  /**
+   * Fold one peer's self-reported progress in, stamping the finish rank if we
+   * are the host. finishOrder never comes off the wire: a peer cannot be
+   * trusted to time its own finish against anyone else's clock, so the host
+   * assigns ranks from the order it observes finishes — the one ordering that
+   * is the same for everybody because one machine produced it.
+   */
+  private record(id: string, p: PeerProgress): void {
+    const kept = this.progress.get(id)?.finishOrder ?? null;
+    const next: PeerProgress = { ...p, holes: [...p.holes], finishOrder: kept };
+    if (this.hostFlag && next.done && next.finishOrder == null) {
+      next.finishOrder = ++this.finishSeq;
+    }
+    this.progress.set(id, next);
+  }
+
+  /** Record another peer's progress. */
   applyProgress(id: string, p: PeerProgress): void {
-    this.progress.set(id, { ...p });
+    this.record(id, p);
     this.connected.add(id);
   }
 
   setSelfProgress(p: PeerProgress): void {
-    this.progress.set(this.selfId, { ...p });
+    this.record(this.selfId, p);
   }
 
   onPeerLeave(id: string): void {
@@ -109,7 +138,17 @@ export class RaceSession {
 
   /** Promote/demote this peer. On promotion it keeps its accumulated state. */
   setHost(isHost: boolean): void {
+    const was = this.hostFlag;
     this.hostFlag = isHost;
+    if (isHost && !was) {
+      // A peer that finished in the gap where the old host died carries no rank,
+      // and an unranked finisher sorts last forever. Adopt them now.
+      for (const [id, p] of this.progress) {
+        if (p.done && p.finishOrder == null) {
+          this.progress.set(id, { ...p, finishOrder: ++this.finishSeq });
+        }
+      }
+    }
     if (isHost && this.everyoneDone()) this.over = true;
   }
 
@@ -134,9 +173,13 @@ export class RaceSession {
         strokes: s.strokes,
         holeStrokes: s.holeStrokes,
         done: s.done,
-        finishedAt: s.finishedAt,
+        holes: [...s.holes],
+        finishOrder: s.finishOrder,
       });
       if (s.name) this.names.set(s.id, s.name);
+      // Inherit the host's counter so a promotion mid-race keeps numbering the
+      // remaining finishers after the ranks already handed out, not from 1.
+      if (s.finishOrder != null) this.finishSeq = Math.max(this.finishSeq, s.finishOrder);
     }
     if (!this.hostFlag) {
       this.remainingMs = snap.remainingMs;
@@ -168,19 +211,31 @@ export class RaceSession {
   }
 }
 
-/** Compact wire form for the 'prog' channel (kept tiny). */
+/**
+ * Compact wire form for the 'prog' channel (kept tiny). Note there is no field
+ * for finishOrder: it is the host's to assign, so a peer has nothing to say
+ * about it and cannot lie about it either.
+ */
 export interface ProgWire {
   h: number;
   s: number;
   hs: number;
   d: 0 | 1;
-  f: number | null;
+  /** Per-hole strokes so far. At most 18 small ints — cheap enough to resend. */
+  hl: number[];
 }
 
 export function encodeProgress(p: PeerProgress): ProgWire {
-  return { h: p.hole, s: p.strokes, hs: p.holeStrokes, d: p.done ? 1 : 0, f: p.finishedAt };
+  return { h: p.hole, s: p.strokes, hs: p.holeStrokes, d: p.done ? 1 : 0, hl: p.holes };
 }
 
 export function decodeProgress(w: ProgWire): PeerProgress {
-  return { hole: w.h, strokes: w.s, holeStrokes: w.hs, done: w.d === 1, finishedAt: w.f };
+  return {
+    hole: w.h,
+    strokes: w.s,
+    holeStrokes: w.hs,
+    done: w.d === 1,
+    holes: w.hl ?? [],
+    finishOrder: null,
+  };
 }

@@ -10,6 +10,7 @@ import { createSfx } from './engine/sound';
 import { createStore } from './engine/storage';
 import { newSeed } from './engine/rng';
 import { createNet, type Net } from './engine/net';
+import { createRounds, type Rounds } from './engine/rematch';
 import { createLobby, createRoomEntry, roomCodeFromUrl } from './engine/lobby';
 import { generateCourse, DEFAULT_HOLES } from './game/course';
 import { GolfGame } from './game/golf';
@@ -17,6 +18,7 @@ import { type Vec } from './game/physics';
 import { Fx } from './fx';
 import { computeView, screenToWorld, draw, PAL, type View, type AimView } from './render';
 import { NetGame } from './net-game';
+import type { RoundPlayer } from './engine/rematch';
 import type { RaceSnapshot } from './game/race';
 import {
   FOOTER_HTML,
@@ -46,7 +48,10 @@ let content: HTMLElement; // .main-content
 let mode: 'solo' | 'race' = 'solo';
 let game: GolfGame | null = null;
 let net: Net | null = null;
+let rounds: Rounds | null = null;
 let netGame: NetGame | null = null;
+let lobby: { destroy: () => void } | null = null;
+let roomEntry: { destroy: () => void } | null = null;
 let loop: Loop | null = null;
 let fx = new Fx(reduced);
 
@@ -60,7 +65,6 @@ let celebrateT = 0;
 let courseSeed: number | string = 0;
 let holeCount = DEFAULT_HOLES;
 let lastBounceSfx = 0;
-let finishedAt: number | null = null;
 let selfFinished = false;
 let raceOver = false;
 let lastSnap: RaceSnapshot | null = null;
@@ -98,6 +102,44 @@ function firstGestureUnlock(): void {
   sfx.unlock();
 }
 
+// ---- room lifecycle ----
+
+/** Resolves once any in-flight room teardown has fully finished. */
+let roomTeardown: Promise<void> = Promise.resolve();
+
+/**
+ * Tear the room down for good. Only ever called on the way to the menu — NEVER
+ * between races. `net.leave()` is awaited because Trystero keeps the room in its
+ * cache until teardown finishes; joining again before then hands back the dying
+ * room and every peer ends up alone and self-elected as host. Rematches keep the
+ * Net alive and start a new round inside it (engine/rematch.ts).
+ */
+function leaveRoom(): Promise<void> {
+  lobby?.destroy();
+  lobby = null;
+  roomEntry?.destroy();
+  roomEntry = null;
+  rounds?.destroy();
+  rounds = null;
+  // The NetGame holds the keepalive and the 'prog'/'snap' receivers, so it has
+  // to go BEFORE the Net it is subscribed to — quitting mid-race used to drop
+  // the Net and leave this ticking and broadcasting into a room we had left.
+  netGame?.destroy();
+  netGame = null;
+  teardownGame();
+  const leaving = net;
+  net = null;
+  // CHAIN, never replace. leaveRoom() runs again on the way into a new room, and
+  // by then `net` is already null — replacing the promise there would hand back
+  // an instantly-resolved teardown while the real one was still inside
+  // Trystero's 99ms window, and the next createNet would throw.
+  roomTeardown = roomTeardown.then(() => leaving?.leave()).then(
+    () => undefined,
+    () => undefined,
+  );
+  return roomTeardown;
+}
+
 // ---- menu ----
 function bestLabel(): string {
   const best = store.get<number | null>(`best-${holeCount}`, null);
@@ -105,7 +147,8 @@ function bestLabel(): string {
 }
 
 function showMenu(): void {
-  teardownGame();
+  void leaveRoom();
+  clearRoomFromUrl();
   shell(menuHTML(bestLabel(), holeCount));
   content.querySelector('#m-solo')?.addEventListener('click', () => {
     firstGestureUnlock();
@@ -152,7 +195,6 @@ function startSolo(seed: number | string, holes: number): void {
   holeCount = holes;
   const course = generateCourse(seed, holes);
   game = new GolfGame(course);
-  finishedAt = null;
   buildGameScreen();
   resetKbAim();
   updateHud();
@@ -161,71 +203,105 @@ function startSolo(seed: number | string, holes: number): void {
 
 // ---- room entry / lobby ----
 function showRoomEntry(): void {
-  teardownGame();
+  void leaveRoom();
   shell(`<div class="screen entry" id="entry"></div>`);
-  createRoomEntry({
+  roomEntry = createRoomEntry({
     container: content.querySelector('#entry')!,
-    onCreate: (code) => enterLobby(code),
-    onJoin: (code) => enterLobby(code),
+    onCreate: (code) => void openRoom(code),
+    onJoin: (code) => void openRoom(code),
     onBack: () => showMenu(),
   });
 }
 
-function connectNet(code: string): Net {
-  const n = createNet(
-    { appId: APP_ID, roomId: code },
-    {
-      onHostChange: (_id, isHost) => onHostChangeRoute(isHost),
-      onPeerLeave: (id) => onPeerLeaveRoute(id),
-      onPeers: (peers) => onPeersRoute(peers),
-    },
-  );
-  return n;
-}
+/**
+ * Join a room ONCE and hold it for as long as the player stays. Every race —
+ * the first and every rematch — runs inside this one Net via `rounds`. Nothing
+ * here may call net.leave() except the trip back to the menu.
+ */
+async function openRoom(code: string): Promise<void> {
+  leaveRoom();
+  // A previous room may still be tearing down (Trystero defers it ~99ms).
+  // Joining inside that window returns the dying room, so wait it out.
+  await roomTeardown;
 
-function enterLobby(code: string): void {
-  teardownGame();
-  net = connectNet(code);
   // Put the room code in the URL so the invite link carries it.
   const url = new URL(location.href);
   url.searchParams.set('room', code);
   url.searchParams.delete('seed');
   history.replaceState(null, '', url.toString());
 
-  shell(`<div class="screen lobby-screen" id="lobby"></div>
-    <button class="btn ghost back-btn" id="lobby-back">← Leave room</button>`);
-  content.querySelector('#lobby-back')?.addEventListener('click', () => {
-    net?.leave();
-    net = null;
-    clearRoomFromUrl();
+  try {
+    net = createNet(
+      { appId: APP_ID, roomId: code },
+      {
+        onHostChange: (_id, isHost) => onHostChangeRoute(isHost),
+        onPeerLeave: (id) => onPeerLeaveRoute(id),
+        onPeers: (peers) => onPeersRoute(peers),
+      },
+    );
+  } catch (err) {
+    // The room is somehow still held (see engine/net.ts). Never strand the
+    // player on a blank screen — go back somewhere they can act.
+    console.error(err);
     showMenu();
-  });
-  createLobby({
-    container: content.querySelector('#lobby')!,
-    net: net!,
-    roomCode: code,
+    return;
+  }
+
+  rounds = createRounds({
+    net,
     playerName: playerName(),
     minPlayers: 2,
+    onRound: ({ seed, players, isHost }) => startRace(seed, players, isHost),
+  });
+
+  showLobby(code);
+}
+
+function showLobby(code: string): void {
+  if (!net || !rounds) return;
+  shell(`<div class="screen lobby-screen" id="lobby"></div>
+    <button class="btn ghost back-btn" id="lobby-back">← Leave room</button>`);
+  content.querySelector('#lobby-back')?.addEventListener('click', () => showMenu());
+  lobby = createLobby({
+    container: content.querySelector('#lobby')!,
+    net,
+    rounds,
+    roomCode: code,
+    minPlayers: 2,
     maxPlayers: 6,
-    onStart: ({ seed, players }) => startRace(code, seed, players.map((p) => ({ id: p.id, name: p.name }))),
   });
 }
 
+/** Drop ?room= so a refresh lands on the menu rather than re-joining a room we
+ *  have left. A ?seed= course link is left alone — it is still replayable. */
 function clearRoomFromUrl(): void {
   const url = new URL(location.href);
+  if (!url.searchParams.has('room')) return;
   url.searchParams.delete('room');
-  url.searchParams.delete('seed');
   history.replaceState(null, '', url.toString());
 }
 
 // ---- race ----
-function startRace(_code: string, seed: number, roster: { id: string; name: string }[]): void {
+function startRace(seed: number, roster: RoundPlayer[], _isHost: boolean): void {
+  if (!net) return;
+  lobby?.destroy();
+  lobby = null;
+  netGame?.destroy();
+  netGame = null;
+
+  // The roster arrives frozen from the host, identical bytes on every peer, so
+  // everyone agrees on the field. If we are not in it we joined mid-start —
+  // wait for the next race rather than playing a ghost nobody is racing.
+  if (!roster.some((p) => p.id === net!.selfId)) {
+    showLobby(roomCodeFromUrl() ?? '');
+    return;
+  }
+
   mode = 'race';
   courseSeed = seed;
   holeCount = DEFAULT_HOLES;
   raceOver = false;
   selfFinished = false;
-  finishedAt = null;
   lastSnap = null;
   const course = generateCourse(seed, holeCount);
   game = new GolfGame(course);
@@ -259,10 +335,7 @@ function onSnapshot(snap: RaceSnapshot): void {
   lastSnap = snap;
   updateRaceStrip(snap);
   if (selfFinished) updateWaitingOverlay(snap);
-  if (snap.over && !raceOver) {
-    raceOver = true;
-    showRaceResults(snap);
-  }
+  if (snap.over) showRaceResults(snap);
 }
 
 // ---- game screen / canvas ----
@@ -574,17 +647,63 @@ async function shareCourse(): Promise<void> {
   }
 }
 
+/**
+ * The latch lives HERE, not on the caller, because two paths reach this screen:
+ * a host snapshot with over=true, and finishRound() when we hole out last. With
+ * the flag set only on the snapshot path, both could fire and re-render the
+ * results out from under the player mid-click.
+ */
 function showRaceResults(snap: RaceSnapshot): void {
+  if (raceOver) return;
+  raceOver = true;
   stopLoop();
+  // The race is over but the ROOM lives on — this is the rematch path. Retire
+  // the round's NetGame (it detaches its channels) and hand the room back to
+  // `rounds`, which will start the next race inside the very same mesh.
   netGame?.destroy();
-  shell(raceResultsHTML(snap.standings, net!.selfId));
-  content.querySelector('#r-menu')?.addEventListener('click', () => {
-    net?.leave();
-    net = null;
-    netGame = null;
-    clearRoomFromUrl();
-    showMenu();
+  netGame = null;
+  rounds?.finish();
+
+  const pars = generateCourse(courseSeed, holeCount).map((h) => h.par);
+  shell(raceResultsHTML(snap.standings, net?.selfId ?? '', pars));
+  content.querySelector('#r-share')?.addEventListener('click', shareCourse);
+  content.querySelector('#r-menu')?.addEventListener('click', () => showMenu());
+
+  const againBtn = content.querySelector<HTMLButtonElement>('#r-again');
+  const status = content.querySelector<HTMLElement>('.again-status');
+
+  againBtn?.addEventListener('click', () => {
+    // NOT a rejoin. The room and the whole peer mesh stay exactly as they are;
+    // this only registers a vote, and the next race starts underneath us once
+    // everyone has voted. Leaving and rejoining here is what used to strand
+    // both players alone as host — see engine/net.ts.
+    if (!rounds) return;
+    if (rounds.state().voted) rounds.unvote();
+    else rounds.vote();
+    paintAgain();
   });
+
+  function paintAgain(): void {
+    if (!rounds || !againBtn || !status) return;
+    const s = rounds.state();
+    againBtn.textContent = s.voted ? 'Ready — waiting…' : 'Play again';
+    againBtn.classList.toggle('waiting', s.voted);
+    const waiting = s.present.length - s.votes.length;
+    status.textContent = s.voted
+      ? waiting > 0
+        ? `Waiting for ${waiting} more player${waiting === 1 ? '' : 's'}…`
+        : 'Starting…'
+      : `${s.votes.length}/${s.present.length} ready for another round`;
+  }
+
+  paintAgain();
+  const tick = setInterval(() => {
+    if (!againBtn || !document.body.contains(againBtn)) {
+      clearInterval(tick);
+      return;
+    }
+    paintAgain();
+  }, 500);
 }
 
 // ---- HUD ----
@@ -676,11 +795,12 @@ function togglePause(): void {
       paused = false;
       startSolo(courseSeed, holeCount);
     });
+    // showMenu() goes through leaveRoom(), which retires the NetGame and the
+    // Rounds BEFORE the Net and awaits the leave. Dropping the Net on its own
+    // here left the NetGame's keepalive ticking and broadcasting snapshots into
+    // a room we had walked out of.
     ov.querySelector('#pz-menu')?.addEventListener('click', () => {
       paused = false;
-      net?.leave();
-      net = null;
-      clearRoomFromUrl();
       showMenu();
     });
   } else {
@@ -716,9 +836,8 @@ function showToast(msg: string): void {
 // ---- progress sync (race) ----
 function syncProgress(): void {
   if (!game || mode !== 'race' || !netGame) return;
-  const p = game.progress();
-  if (p.done && finishedAt == null) finishedAt = Date.now();
-  netGame.pushProgress({ ...p, finishedAt });
+  // No local finish timestamp: the host stamps finish order (see game/race.ts).
+  netGame.pushProgress({ ...game.progress(), finishOrder: null });
 }
 
 // ---- teardown ----
@@ -750,7 +869,7 @@ function boot(): void {
 
   if (roomParam) {
     // Deep-linked invite — go straight to the lobby (consume the link once).
-    enterLobby(roomParam);
+    void openRoom(roomParam);
     return;
   }
   if (seedParam) {

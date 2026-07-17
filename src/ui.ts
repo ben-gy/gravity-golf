@@ -119,32 +119,59 @@ export function soloResultsHTML(
     </div>`;
 }
 
-/** Live race final standings. */
-export function raceResultsHTML(standings: RaceStanding[], selfId: string): string {
+/**
+ * Live race final standings: a full per-player, per-hole card rather than just
+ * a total, so everyone can see WHERE the race was won — which hole cost them,
+ * who aced what — instead of a single number they have to take on trust.
+ */
+export function raceResultsHTML(standings: RaceStanding[], selfId: string, pars: number[]): string {
+  const totalPar = pars.reduce((s, p) => s + p, 0);
+  const holeHeads = pars.map((p, i) => `<th class="hcol"><span class="hnum">${i + 1}</span><span class="hpar">${p}</span></th>`).join('');
+
   const rows = standings
     .map((s, i) => {
       const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}`;
-      const status = s.done
-        ? `${s.strokes} strokes`
-        : `hole ${s.hole + 1} · ${s.strokes}`;
+      const cells = pars
+        .map((par, h) => {
+          const st = s.holes[h];
+          if (st == null) return `<td class="hcol none">–</td>`;
+          const lab = parLabel(st, par);
+          return `<td class="hcol"><span class="chip ${lab.c}">${st}</span></td>`;
+        })
+        .join('');
+      const played = s.holes.reduce((a, b) => a + b, 0);
+      const parSoFar = pars.slice(0, s.holes.length).reduce((a, b) => a + b, 0);
+      const delta = s.holes.length ? toParStr(played - parSoFar) : '–';
       return `<tr class="${s.id === selfId ? 'is-self' : ''}">
         <td class="rank">${medal}</td>
-        <td>${esc(s.name)}${s.id === selfId ? ' (you)' : ''}${s.connected ? '' : ' <span class="dc">left</span>'}</td>
-        <td>${s.done ? '✓' : ''} ${status}</td>
+        <td class="pname">${esc(s.name)}${s.id === selfId ? ' (you)' : ''}${s.connected ? '' : ' <span class="dc">left</span>'}</td>
+        ${cells}
+        <td class="ptot">${s.done ? `${s.strokes} ✓` : `${s.strokes}<span class="dnf"> · hole ${s.hole + 1}</span>`}</td>
+        <td class="ppar">${delta}</td>
       </tr>`;
     })
     .join('');
+
   return `
     <div class="screen results">
       <h2 class="results-title">Race over</h2>
-      <div class="table-wrap">
+      <div class="table-wrap race-wrap">
         <table class="scorecard race">
-          <thead><tr><th>#</th><th>Player</th><th>Result</th></tr></thead>
+          <thead>
+            <tr>
+              <th>#</th><th>Player</th>${holeHeads}<th>Total</th><th>${totalPar}</th>
+            </tr>
+          </thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
+      <p class="card-key">Each cell is strokes on that hole; the small number in the header is its par.</p>
       <div class="menu-actions">
-        <button class="btn primary" id="r-menu">Back to menu</button>
+        <button class="btn primary" id="r-again">Play again</button>
+        <button class="btn" id="r-share">Share this course</button>
+        <button class="btn ghost" id="r-menu">Back to menu</button>
       </div>
+      <p class="again-status" role="status" aria-live="polite"></p>
+      <p class="share-flash" role="status" aria-live="polite"></p>
     </div>`;
 }

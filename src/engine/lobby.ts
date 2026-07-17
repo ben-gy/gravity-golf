@@ -1,14 +1,20 @@
 /**
- * lobby.ts — drop-in peer-to-peer lobby built on net.ts (copied from patterns/
- * and extended with a room-entry screen).
+ * lobby.ts — drop-in peer-to-peer lobby built on net.ts + rematch.ts (copied
+ * from patterns/ and extended with a room-entry screen).
  *
  * Flow: createRoomEntry (create a room OR type a code) → createLobby (roster,
- * ready states, host Start, shared-seed broadcast, animated connecting spinner).
- * The host is elected by net.ts (min peer id). On Start the host broadcasts
- * {seed}; every client resolves onStart with the same seed.
+ * ready states, host Start, animated connecting spinner).
+ *
+ * This file is a VIEW. It owns no protocol: presence, readiness, quorum, the
+ * shared course seed and the frozen roster all come from rematch.ts, so the
+ * first race and every rematch travel the identical code path. The lobby used to
+ * run its own 'pres'/'preq'/'go' channels, which meant two ways to start a race
+ * and a 'go' that carried a seed but no roster — leaving peers free to disagree
+ * about who was in the field.
  */
 
 import type { Net, PeerId } from './net';
+import type { Rounds } from './rematch';
 
 export interface LobbyPlayer {
   id: PeerId;
@@ -18,25 +24,14 @@ export interface LobbyPlayer {
   isSelf: boolean;
 }
 
-export interface LobbyStartInfo {
-  seed: number;
-  players: LobbyPlayer[];
-  isHost: boolean;
-}
-
 export interface LobbyConfig {
   container: HTMLElement;
   net: Net;
+  /** The round protocol driving this room. Owns start; the lobby just renders. */
+  rounds: Rounds;
   roomCode: string;
-  playerName: string;
   minPlayers?: number;
   maxPlayers?: number;
-  onStart: (info: LobbyStartInfo) => void;
-}
-
-interface Presence {
-  name: string;
-  ready: boolean;
 }
 
 /**
@@ -136,56 +131,31 @@ export function createRoomEntry(config: RoomEntryConfig): { destroy: () => void 
 }
 
 export function createLobby(config: LobbyConfig): { destroy: () => void } {
-  const { net, container } = config;
+  const { net, rounds, container } = config;
   const minPlayers = config.minPlayers ?? 2;
   const maxPlayers = config.maxPlayers ?? 8;
 
-  const presence = new Map<PeerId, Presence>();
-  presence.set(net.selfId, { name: config.playerName, ready: false });
-  let started = false;
-
-  const sendPres = net.channel<Presence & { id: PeerId }>('pres', (p) => {
-    presence.set(p.id, { name: p.name, ready: p.ready });
-    render();
-  });
-  const reqSync = net.channel<null>('preq', (_d, from) => {
-    sendPres({ id: net.selfId, ...self() }, from);
-  });
-  const sendGo = net.channel<{ seed: number }>('go', ({ seed }) => begin(seed));
-
-  function self(): Presence {
-    return presence.get(net.selfId)!;
-  }
-  function broadcastPresence(): void {
-    sendPres({ id: net.selfId, ...self() });
-  }
-
+  // The lobby renders; it does not decide. Presence, readiness, quorum and the
+  // start signal all live in rematch.ts, so the first race and every rematch
+  // travel the identical code path — including the frozen roster.
   function players(): LobbyPlayer[] {
+    const s = rounds.state();
     const host = net.host();
-    return net
-      .peers()
-      .map((id) => {
-        const p = presence.get(id) ?? { name: '…', ready: false };
-        return { id, name: p.name, ready: p.ready, isHost: id === host, isSelf: id === net.selfId };
-      })
+    const ready = new Set(s.votes.map((v) => v.id));
+    return s.present
+      .map((p) => ({
+        id: p.id,
+        name: p.name,
+        ready: ready.has(p.id),
+        isHost: p.id === host,
+        isSelf: p.id === net.selfId,
+      }))
       .sort((a, b) => (a.isSelf ? -1 : b.isSelf ? 1 : a.id.localeCompare(b.id)));
   }
 
-  function canStart(): boolean {
-    const ps = players();
-    return net.isHost() && ps.length >= minPlayers && ps.every((p) => p.ready || p.isHost);
-  }
-
-  function begin(seed: number): void {
-    if (started) return;
-    started = true;
-    config.onStart({ seed, players: players(), isHost: net.isHost() });
-  }
-
   function toggleReady(): void {
-    const me = self();
-    presence.set(net.selfId, { ...me, ready: !me.ready });
-    broadcastPresence();
+    if (rounds.state().voted) rounds.unvote();
+    else rounds.vote();
     render();
   }
 
@@ -217,16 +187,31 @@ export function createLobby(config: LobbyConfig): { destroy: () => void } {
     }
   }
 
-  function start(): void {
-    if (!canStart()) return;
-    const seed = (Math.floor(Math.random() * 0xffffffff)) >>> 0;
-    sendGo({ seed });
-    begin(seed);
+  /** Unchanged gate: every non-host has readied up, and we have a full grid. */
+  function canStart(): boolean {
+    const ps = players();
+    return net.isHost() && ps.length >= minPlayers && ps.every((p) => p.ready || p.isHost);
   }
 
+  function start(): void {
+    if (!canStart()) return;
+    // The host abstains from voting until it presses Start, which is what keeps
+    // rematch's auto-start from firing here and preserves "the host starts the
+    // race". Voting first puts the host into the frozen roster go() ships.
+    rounds.vote();
+    rounds.go();
+  }
+
+  /** Repaint only on a real change — a blind interval would fight the user for
+   *  focus on the invite-link field. */
+  let painted = '';
+
   function render(): void {
-    if (started) return;
+    if (rounds.state().phase === 'playing') return;
     const ps = players();
+    const key = JSON.stringify([ps, canStart()]);
+    if (key === painted) return;
+    painted = key;
     const link = inviteLink(config.roomCode);
     container.innerHTML = `
       <div class="lobby">
@@ -261,7 +246,7 @@ export function createLobby(config: LobbyConfig): { destroy: () => void } {
               ? `<button class="lobby-btn lobby-start" type="button" ${canStart() ? '' : 'disabled'}>
                    ${ps.length < minPlayers ? `Waiting for ${minPlayers - ps.length} more…` : 'Start race'}
                  </button>`
-              : `<button class="lobby-btn lobby-ready" type="button">${self().ready ? 'Not ready' : "I'm ready"}</button>
+              : `<button class="lobby-btn lobby-ready" type="button">${rounds.state().voted ? 'Not ready' : "I'm ready"}</button>
                  <p class="lobby-wait"><span class="spinner sm" aria-hidden="true"></span> Waiting for the host to start…</p>`
           }
         </div>
@@ -276,15 +261,20 @@ export function createLobby(config: LobbyConfig): { destroy: () => void } {
     });
   }
 
+  // Repaint for roster/ready changes and for a host transfer (net.ts re-elects
+  // when the host leaves), so a promoted peer learns Start is now theirs.
+  // Presence gossip and resync belong to rematch.ts, not to this view.
+  let lastHost = net.host();
   const poll = setInterval(() => {
-    if (!started) {
-      reqSync(null);
-      render();
+    render();
+    const host = net.host();
+    if (host !== lastHost) {
+      const wasHost = lastHost === net.selfId;
+      lastHost = host;
+      if (net.isHost() && !wasHost) flash("The host left — you're the host now");
     }
-  }, 1500);
+  }, 600);
 
-  broadcastPresence();
-  reqSync(null);
   render();
 
   return {

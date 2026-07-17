@@ -28,8 +28,8 @@ export class NetGame {
   readonly net: Net;
   readonly session: RaceSession;
   private cb: NetGameCallbacks;
-  private sendProg: (w: ProgWire) => void;
-  private sendSnap: (s: RaceSnapshot) => void;
+  private sendProg: ((w: ProgWire) => void) & { off: () => void };
+  private sendSnap: ((s: RaceSnapshot) => void) & { off: () => void };
   private keepalive: ReturnType<typeof setInterval> | null = null;
   private lastTick = 0;
   private started = false;
@@ -118,5 +118,12 @@ export class NetGame {
 
   destroy(): void {
     this.stopKeepalive();
+    // The Net now outlives each race (rematches run inside the same room) and
+    // channel() fans out to every receiver, so a finished NetGame that stays
+    // subscribed would keep folding the NEXT race's 'prog' into its dead
+    // RaceSession — and, if it was the host, broadcast snapshots of a finished
+    // race over the live one. Detach with the round that owns them.
+    this.sendProg.off();
+    this.sendSnap.off();
   }
 }
