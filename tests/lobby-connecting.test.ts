@@ -38,6 +38,9 @@ function fakeRounds(present: PeerId[]): Rounds {
     voted: false,
     isHost: false,
     canStart: false,
+    // Null is the honest value here: nobody has heard the host's settings yet,
+    // which is exactly the "room has not settled" state this file is about.
+    hostOpts: null,
     startsInMs: null,
   };
   return {

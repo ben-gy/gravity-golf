@@ -5,6 +5,7 @@
 
 import type { HoleResult } from './game/golf';
 import type { RaceStanding } from './game/race';
+import type { Mode } from './modes';
 
 export const FOOTER_HTML = `
   <footer class="site-footer">
@@ -32,7 +33,7 @@ export function parLabel(strokes: number, par: number): { t: string; c: string }
   return { t: `+${d}`, c: 'over' };
 }
 
-export function menuHTML(bestLabel: string, holes: number): string {
+export function menuHTML(bestLabel: string, mode: Mode, modePicker: string): string {
   return `
     <div class="screen menu">
       <div class="logo">
@@ -40,8 +41,9 @@ export function menuHTML(bestLabel: string, holes: number): string {
         <h1 class="title">Gravity<span>Golf</span></h1>
       </div>
       <p class="tagline">Slingshot your ball through a field of planets — bend it around gravity into the hole.</p>
+      ${modePicker}
       <div class="menu-actions">
-        <button class="btn primary" id="m-solo">Play solo · ${holes} holes</button>
+        <button class="btn primary" id="m-solo">Play solo · ${esc(mode.name)}</button>
         <button class="btn" id="m-friends">Play with friends</button>
         <div class="menu-row">
           <button class="btn ghost" id="m-how">How to play</button>
@@ -73,6 +75,7 @@ export function aboutHTML(): string {
       <h2>About</h2>
       <p>Gravity Golf is a physics mini-golf game: every shot is a little orbital puzzle. Play solo, share a <b>seed link</b> so a friend plays the exact same course and compares scores, or race up to 6 players live.</p>
       <p>It runs entirely in your browser — no login, no install, no data stored on any server. Multiplayer is <b>peer-to-peer</b> over WebRTC; a free public signaling relay only helps the browsers find each other for the initial handshake, then play flows directly between you.</p>
+      <p><b>Public rooms and your IP address.</b> Rooms are private by default: only people you send the code or link to can find them. If you list a room publicly — or tap <b>Browse public games</b> — your browser joins a shared peer-to-peer list, and connecting to a peer means exchanging IP addresses. So on the public list, strangers can see your IP; in a private room, only the friends you invited can. That is true of any peer-to-peer game, and there is no server here to hide behind. It is opt-in on both sides: nothing joins the list until you tap it, and your browser leaves the list as soon as you stop browsing, or your room starts or goes private.</p>
       <p>Anonymous, cookie-less page-view counts come from Cloudflare Web Analytics — the only network call the base game makes.</p>
       <p>Built by <a href="https://benrichardson.dev/" target="_blank" rel="noopener">benrichardson.dev</a>.</p>
     </div>`;

@@ -262,8 +262,13 @@ body {
   max-width: 380px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
   text-align: center;
+}
+.re-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 .re-title {
   margin: 0;
@@ -274,41 +279,21 @@ body {
   margin: 0;
   font-size: 14px;
 }
-.re-create {
-  appearance: none;
-  border: none;
-  background: linear-gradient(180deg, #57d6ff, #2aa6e0);
-  color: #052033;
-  font-weight: 700;
-  font-size: 17px;
-  padding: 16px;
-  border-radius: var(--radius);
-  cursor: pointer;
-  min-height: 52px;
-  box-shadow: 0 6px 20px rgba(77, 208, 255, 0.35);
-}
-.re-or {
+.re-divider {
   display: flex;
   align-items: center;
   color: var(--muted);
   font-size: 13px;
   gap: 10px;
 }
-.re-or::before,
-.re-or::after {
+.re-divider::before,
+.re-divider::after {
   content: '';
   flex: 1;
   height: 1px;
   background: var(--line);
 }
-.re-label {
-  display: block;
-  text-align: left;
-  font-size: 13px;
-  color: var(--muted);
-  margin-bottom: 6px;
-}
-.re-joinrow {
+.re-join {
   display: flex;
   gap: 8px;
 }
@@ -331,30 +316,180 @@ body {
   outline: none;
   border-color: var(--cyan);
 }
-.re-join {
-  appearance: none;
-  border: 1px solid var(--cyan);
-  background: rgba(77, 208, 255, 0.12);
-  color: var(--cyan);
-  font-weight: 700;
+.re-go {
   padding: 0 20px;
-  border-radius: 12px;
-  cursor: pointer;
+  flex: 0 0 auto;
 }
-.re-err {
+.re-error {
   color: var(--danger);
   font-size: 13px;
   min-height: 18px;
   margin: 0;
 }
-.re-back {
-  appearance: none;
-  background: none;
-  border: none;
+
+/* The IP disclosure. Muted, but never hidden: it sits under BOTH opt-ins (the
+ * public/private chips and the browse button) because joining the board and
+ * listing on it cost the same thing. Small, not invisible — if it cannot be
+ * read it is not a disclosure. */
+.re-note {
+  margin: -4px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
   color: var(--muted);
+  text-align: left;
+}
+
+/* ---- public room list ---- */
+.re-rooms {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.re-room {
+  width: 100%;
+  appearance: none;
   cursor: pointer;
-  font-size: 14px;
-  padding: 8px;
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  color: var(--text);
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 10px;
+  align-items: center;
+}
+.re-room:hover {
+  border-color: var(--cyan);
+}
+.re-room-host {
+  font-weight: 700;
+}
+.re-room-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 2px;
+  color: var(--cyan);
+  font-size: 13px;
+}
+.re-room-note {
+  font-size: 12px;
+  color: var(--muted);
+}
+.re-room-meta {
+  font-size: 12px;
+  color: var(--muted);
+  text-align: right;
+}
+.re-room-state {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  color: var(--amber);
+}
+.re-room.playing {
+  opacity: 0.75;
+}
+.re-empty {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted);
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+}
+
+/* ---- public / private chips ---- */
+.vis {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.vis-chip {
+  appearance: none;
+  cursor: pointer;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 52px;
+  justify-content: center;
+}
+.vis-chip.on {
+  border-color: var(--cyan);
+  background: rgba(77, 208, 255, 0.12);
+  color: var(--text);
+}
+.vis-name {
+  font-weight: 700;
+  font-size: 15px;
+}
+.vis-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* ---- mode picker ---- */
+.modes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  width: 100%;
+  max-width: 380px;
+}
+.mode-chip {
+  appearance: none;
+  cursor: pointer;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 6px;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 52px;
+  justify-content: center;
+}
+.mode-chip.on {
+  border-color: var(--amber);
+  background: rgba(255, 159, 69, 0.12);
+  color: var(--text);
+}
+.mode-name {
+  font-weight: 700;
+  font-size: 15px;
+}
+.mode-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+.mode-blurb {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
+  min-height: 16px;
+}
+.mode-note {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+  text-align: center;
+}
+.mode-note.pub {
+  color: var(--amber);
+  font-size: 12px;
 }
 
 /* ---- lobby ---- */
@@ -854,4 +989,48 @@ body {
   .toast {
     transition: none;
   }
+}
+
+/* ---- countdown ---- */
+/* Sits over the course, but must never eat the first tap: the player is already
+ * reaching for the ball as GO lands, and a backdrop that swallows that pointerdown
+ * costs them the shot the countdown existed to make fair. */
+.countdown {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  z-index: 30;
+}
+.cd-num {
+  font-size: clamp(72px, 22vw, 140px);
+  font-weight: 800;
+  line-height: 1;
+  color: var(--text);
+  text-shadow: 0 0 30px rgba(77, 208, 255, 0.55), 0 6px 30px rgba(0, 0, 0, 0.6);
+  animation: cd-pop 0.9s ease-out both;
+}
+.cd-num.cd-go {
+  color: var(--green);
+  text-shadow: 0 0 40px rgba(53, 208, 127, 0.7), 0 6px 30px rgba(0, 0, 0, 0.6);
+}
+@keyframes cd-pop {
+  0% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+  25% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0.9);
+    opacity: 0.85;
+  }
+}
+/* Reduced motion keeps the digits (they are the information) and drops the
+   scaling — the pips still carry the timing. */
+.countdown.reduced .cd-num {
+  animation: none;
 }

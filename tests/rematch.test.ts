@@ -84,7 +84,10 @@ interface Seat {
   got: RoundInfo[];
 }
 
-function table(ids: PeerId[], opts: { minPlayers?: number } = {}): Seat[] {
+function table(
+  ids: PeerId[],
+  opts: { minPlayers?: number; roundOpts?: (id: PeerId) => unknown } = {},
+): Seat[] {
   const bus = new Bus();
   return ids.map((id) => {
     const net = mockNet(bus, id);
@@ -93,6 +96,9 @@ function table(ids: PeerId[], opts: { minPlayers?: number } = {}): Seat[] {
       net,
       playerName: id.toUpperCase(),
       minPlayers: opts.minPlayers ?? 2,
+      // Per-peer so a test can give every peer a DIFFERENT local pick — the only
+      // way to tell "the host's setting" apart from "my own setting".
+      ...(opts.roundOpts ? { roundOpts: () => opts.roundOpts!(id) } : {}),
       onRound: (info) => seat.got.push(info),
     });
     return seat;
@@ -361,5 +367,79 @@ describe('createRounds — never deadlock waiting for a vote that never comes', 
     expect(seats[2].got.length).toBe(2);
     expect(seats[2].got[1].players.map((p) => p.id)).toEqual(['a', 'b', 'c']);
     vi.useRealTimers();
+  });
+});
+
+/**
+ * The bug these exist to prevent has shipped once already: a guest rendering its
+ * OWN local pick under the label "Host picked X". Every peer here is given a
+ * DIFFERENT local pick, because a test where both peers want the same mode
+ * passes just as happily with the host's choice ignored entirely.
+ */
+describe('createRounds — the host\'s settings, never your own', () => {
+  const picks = (id: PeerId): unknown => ({ mode: id === 'a' ? 'gauntlet' : 'sprint' });
+
+  it('gives a guest the HOST\'s gossiped pick, not the guest\'s own', () => {
+    seats = table(['a', 'b'], { roundOpts: picks });
+    const [host, guest] = seats;
+
+    expect(host.net.isHost()).toBe(true);
+    expect(host.rounds.state().hostOpts).toEqual({ mode: 'gauntlet' });
+    // The guest locally wants 'sprint'. It must still report the host's pick.
+    expect(guest.rounds.state().hostOpts).toEqual({ mode: 'gauntlet' });
+  });
+
+  it('reports null rather than a guess when the host has gossiped nothing', () => {
+    // Only the GUEST has a pick to offer; the host announces no opts at all.
+    // "Waiting for the host's pick…" is the honest render here — reporting the
+    // guest's own setting would be a confident lie about a room it has not heard
+    // from.
+    const bus = new Bus();
+    const hostNet = mockNet(bus, 'a');
+    const guestNet = mockNet(bus, 'b');
+    createRounds({ net: hostNet, playerName: 'A', onRound: () => {} });
+    const guest = createRounds({
+      net: guestNet,
+      playerName: 'B',
+      roundOpts: () => ({ mode: 'sprint' }),
+      onRound: () => {},
+    });
+
+    expect(guestNet.isHost()).toBe(false);
+    expect(guest.state().hostOpts).toBeNull();
+  });
+
+  it('follows the host when the host changes its pick', () => {
+    const bus = new Bus();
+    const hostNet = mockNet(bus, 'a');
+    const guestNet = mockNet(bus, 'b');
+    let hostPick = 'classic';
+    const host = createRounds({
+      net: hostNet,
+      playerName: 'A',
+      roundOpts: () => ({ mode: hostPick }),
+      onRound: () => {},
+    });
+    const guest = createRounds({
+      net: guestNet,
+      playerName: 'B',
+      roundOpts: () => ({ mode: 'sprint' }),
+      onRound: () => {},
+    });
+    expect(guest.state().hostOpts).toEqual({ mode: 'classic' });
+
+    hostPick = 'gauntlet';
+    host.vote(); // any gossip re-announces the current pick
+
+    expect(guest.state().hostOpts).toEqual({ mode: 'gauntlet' });
+  });
+
+  it('freezes the HOST\'s pick into the start every peer plays', () => {
+    seats = table(['a', 'b'], { roundOpts: picks });
+    seats.forEach((s) => s.rounds.vote());
+
+    // Not "each peer got its own opts" — the same bytes on both.
+    expect(seats[0].got[0].opts).toEqual({ mode: 'gauntlet' });
+    expect(seats[1].got[0].opts).toEqual({ mode: 'gauntlet' });
   });
 });

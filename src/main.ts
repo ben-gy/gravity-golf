@@ -16,11 +16,18 @@ import { createRounds, type Rounds } from './engine/rematch';
 import {
   clearRoomInUrl,
   createLobby,
+  createListing,
   createRoomEntry,
   roomCodeFromUrl,
   setRoomInUrl,
+  P2P_IP_NOTE,
+  type BoardAccess,
+  type Listing,
 } from './engine/lobby';
-import { generateCourse, DEFAULT_HOLES } from './game/course';
+import { createNoticeboard, type Noticeboard, type PublicRoom } from './engine/noticeboard';
+import { createCountdown } from './countdown';
+import { DEFAULT_MODE, MODE_LIST, modeOf, timeLimitMs, type Mode, type ModeId } from './modes';
+import { generateCourse } from './game/course';
 import { GolfGame } from './game/golf';
 import { type Vec } from './game/physics';
 import { Fx } from './fx';
@@ -40,6 +47,8 @@ import {
 } from './ui';
 
 const APP_ID = 'gravity-golf';
+const MIN_PLAYERS = 2;
+const MAX_PLAYERS = 6;
 const MAX_DRAG = 46; // world units for full power
 const POWER_SCALE = 1.7;
 const MIN_DRAG = 2.5; // deadzone
@@ -62,10 +71,24 @@ let game: GolfGame | null = null;
 let net: Net | null = null;
 let rounds: Rounds | null = null;
 let netGame: NetGame | null = null;
-let lobby: { destroy: () => void } | null = null;
+let lobby: { destroy: () => void; repaint: () => void } | null = null;
 let roomEntry: { destroy: () => void } | null = null;
 let loop: Loop | null = null;
 let fx = new Fx(reduced);
+let countdown: { cancel: () => void } | null = null;
+let listing: Listing | null = null;
+let listingTick: number | undefined;
+/** The room we are in, and whether it is on the public list. Private by default. */
+let roomCode = '';
+let roomPublic = false;
+
+/** The mode this player last chose. The HOST's choice is what a room plays. */
+let modeId: ModeId = modeOf(store.get<string>('mode', DEFAULT_MODE)).id;
+
+function setMode(id: ModeId): void {
+  modeId = modeOf(id).id;
+  store.set('mode', modeId);
+}
 
 let canvas: HTMLCanvasElement | null = null;
 let ctx: CanvasRenderingContext2D | null = null;
@@ -75,7 +98,13 @@ let dpr = 1;
 let paused = false;
 let celebrateT = 0;
 let courseSeed: number | string = 0;
-let holeCount = DEFAULT_HOLES;
+// The course actually being PLAYED. Set from a Mode at every start — in a race,
+// from the HOST's mode as it arrived frozen in the round start, never from
+// `modeId`, which is only ever this peer's own lobby pick. Kept as the whole
+// Mode rather than a loose hole count so the two cannot drift apart: a restart
+// or a scorecard that rebuilt the course with the right length and the wrong
+// tier would silently show pars from a course nobody played.
+let playedMode: Mode = modeOf(DEFAULT_MODE);
 let lastBounceSfx = 0;
 let selfFinished = false;
 let raceOver = false;
@@ -114,6 +143,150 @@ function firstGestureUnlock(): void {
   sfx.unlock();
 }
 
+// ---- mode picker -------------------------------------------------------------
+
+function modePicker(): string {
+  const m = modeOf(modeId);
+  return `
+    <div class="modes" role="radiogroup" aria-label="Course">
+      ${MODE_LIST.map(
+        (x) => `<button class="mode-chip${x.id === m.id ? ' on' : ''}" type="button"
+          role="radio" aria-checked="${x.id === m.id}" data-mode="${x.id}">
+          <span class="mode-name">${esc(x.name)}</span>
+          <span class="mode-meta">${x.holes} holes${x.tier ? ' · hard' : ''}</span>
+        </button>`,
+      ).join('')}
+      <p class="mode-blurb">${esc(m.blurb)}</p>
+    </div>`;
+}
+
+function modeNote(): string {
+  // The HOST's gossiped choice — never our own local pick. Rendering `modeId`
+  // here would confidently tell a guest "Host picked Sprint" while the host was
+  // actually on Gauntlet, and then a 9-hole course would appear.
+  const hostOpts = rounds?.state().hostOpts as { mode?: unknown; pub?: unknown } | null | undefined;
+  if (hostOpts == null) return `<p class="mode-note">Waiting for the host's pick…</p>`;
+  const m = modeOf(hostOpts.mode);
+  return (
+    `<p class="mode-note">Host picked <strong>${esc(m.name)}</strong> · ${m.holes} holes</p>` +
+    // Guests are on the host's course too. Someone who was handed an invite link
+    // has no way of knowing strangers can walk in unless we say so.
+    (hostOpts.pub
+      ? `<p class="mode-note pub">This room is listed publicly — anyone browsing can join.</p>`
+      : '')
+  );
+}
+
+function wireModePicker(repaint: () => void): void {
+  for (const btn of content.querySelectorAll<HTMLButtonElement>('.mode-chip')) {
+    btn.addEventListener('click', () => {
+      setMode(btn.dataset.mode as ModeId);
+      sfx.play('blip');
+      repaint();
+    });
+  }
+}
+
+// ---- public / private --------------------------------------------------------
+
+/** The host's own control, in the lobby: a room can be taken off the list again. */
+function visibilityPicker(): string {
+  const chip = (pub: boolean, name: string, meta: string): string =>
+    `<button class="vis-chip${roomPublic === pub ? ' on' : ''}" type="button"
+      role="radio" aria-checked="${roomPublic === pub}" data-pub="${pub ? 1 : 0}">
+      <span class="vis-name">${esc(name)}</span>
+      <span class="vis-meta">${esc(meta)}</span>
+    </button>`;
+  return `
+    <div class="vis" role="radiogroup" aria-label="Who can join">
+      ${chip(false, 'Private', 'Invite only')}
+      ${chip(true, 'Public', 'Listed for anyone')}
+    </div>
+    <p class="re-note">${esc(P2P_IP_NOTE)}</p>`;
+}
+
+function wireVisibility(repaint: () => void): void {
+  for (const btn of content.querySelectorAll<HTMLButtonElement>('.vis-chip')) {
+    btn.addEventListener('click', () => {
+      roomPublic = btn.dataset.pub === '1';
+      sfx.play('blip');
+      // Immediately, not on the next tick: "private" has to mean off the list
+      // now, not within a second.
+      syncListing();
+      repaint();
+    });
+  }
+}
+
+// ---- the public room list ----------------------------------------------------
+//
+// At most one board, held only while something is actually using it — browsing
+// the list, or listing our own room. It is a mesh of STRANGERS (see P2P_IP_NOTE),
+// so it is never opened by the page loading and never left running behind a
+// screen the player has walked away from.
+
+let board: Noticeboard | null = null;
+let boardRooms: ((rooms: PublicRoom[]) => void) | null = null;
+/** Serialises open/close. net.ts throws if the board's room is rejoined while
+ *  the last one is still tearing down, and browse → back → browse is two taps. */
+let boardQueue: Promise<void> = Promise.resolve();
+
+function onBoard(then: () => void): Promise<void> {
+  boardQueue = boardQueue
+    .then(() => {
+      board ??= createNoticeboard({ appId: APP_ID, onRooms: (r) => boardRooms?.(r) });
+      then();
+    })
+    .then(
+      () => undefined,
+      (e) => console.error(e),
+    );
+  return boardQueue;
+}
+
+const boardAccess: BoardAccess = {
+  open(onRooms) {
+    boardRooms = onRooms;
+    // Hand over whatever is already known so the list is not blank for a cycle.
+    return onBoard(() => onRooms(board!.rooms()));
+  },
+  announce(ad) {
+    return onBoard(() => board!.announce(ad));
+  },
+  close() {
+    boardRooms = null;
+    const b = board;
+    board = null;
+    if (!b) return;
+    // CHAIN, never replace — same trap as roomTeardown below.
+    boardQueue = boardQueue.then(() => b.destroy()).then(
+      () => undefined,
+      () => undefined,
+    );
+  },
+};
+
+/** Feed engine/lobby.ts's roomAd() rule the room's current truth. It decides. */
+function syncListing(): void {
+  if (!listing) return;
+  if (!net || !rounds) {
+    listing.close();
+    return;
+  }
+  const s = rounds.state();
+  listing.sync({
+    isPublic: roomPublic,
+    isHost: net.isHost(),
+    inLobby: !!lobby,
+    playing: s.phase === 'playing',
+    code: roomCode,
+    host: playerName(),
+    players: s.present.length,
+    max: MAX_PLAYERS,
+    note: `${modeOf(modeId).name} · ${modeOf(modeId).holes} holes`,
+  });
+}
+
 // ---- room lifecycle ----
 
 /** Resolves once any in-flight room teardown has fully finished. */
@@ -138,6 +311,21 @@ function leaveRoom(): Promise<void> {
   // the Net and leave this ticking and broadcasting into a room we had left.
   netGame?.destroy();
   netGame = null;
+  // Off the list and off the board, before anything else can go wrong. Leaving
+  // is one of the three ways a room stops being public (the others are going
+  // private and starting a race) and it is the one where nobody is left to
+  // notice a stale listing.
+  listing?.close();
+  listing = null;
+  if (listingTick) clearInterval(listingTick);
+  listingTick = undefined;
+  roomPublic = false;
+  roomCode = '';
+  // Also covers a board opened by the browse screen: leaveRoom() is on every
+  // path out of it.
+  boardAccess.close();
+  countdown?.cancel();
+  countdown = null;
   teardownGame();
   // The room is over for us — take it out of the URL so a refresh, or reopening
   // from the home-screen icon, lands on the menu instead of silently rejoining.
@@ -156,17 +344,22 @@ function leaveRoom(): Promise<void> {
 }
 
 // ---- menu ----
+/** Bests are per MODE: a 3-hole Sprint and a 9-hole Gauntlet are not comparable. */
 function bestLabel(): string {
-  const best = store.get<number | null>(`best-${holeCount}`, null);
-  return best != null ? `Best ${holeCount}-hole round: ${best} strokes` : 'No round played yet — go for a low score!';
+  const m = modeOf(modeId);
+  const best = store.get<number | null>(`best-${m.id}`, null);
+  return best != null
+    ? `Best ${m.name} round: ${best} strokes`
+    : 'No round played yet — go for a low score!';
 }
 
 function showMenu(): void {
   void leaveRoom();
-  shell(menuHTML(bestLabel(), holeCount));
+  shell(menuHTML(bestLabel(), modeOf(modeId), modePicker()));
+  wireModePicker(() => showMenu());
   content.querySelector('#m-solo')?.addEventListener('click', () => {
     firstGestureUnlock();
-    startSolo(newSeed(), holeCount);
+    startSolo(newSeed(), modeOf(modeId));
   });
   content.querySelector('#m-friends')?.addEventListener('click', () => {
     firstGestureUnlock();
@@ -203,11 +396,11 @@ function closeModal(): void {
 }
 
 // ---- solo ----
-function startSolo(seed: number | string, holes: number): void {
+function startSolo(seed: number | string, m: Mode): void {
   mode = 'solo';
   courseSeed = seed;
-  holeCount = holes;
-  const course = generateCourse(seed, holes);
+  playedMode = m;
+  const course = generateCourse(seed, m.holes, m.tier);
   game = new GolfGame(course);
   buildGameScreen();
   resetKbAim();
@@ -221,11 +414,14 @@ function showRoomEntry(): void {
   shell(`<div class="screen entry" id="entry"></div>`);
   roomEntry = createRoomEntry({
     container: content.querySelector('#entry')!,
+    subtitle: 'Peer-to-peer — no server, no login. Start a room or join one.',
+    // Handing the entry `board` is what makes public rooms exist at all — it
+    // does not join anything until the player taps Browse.
+    board: boardAccess,
     // Minting the code is the ONLY way to arrive as the host. Typing a friend's
     // code walks into a room they already hold — see openRoom's claimHost.
-    onCreate: (code) => void openRoom(code, true),
-    onJoin: (code) => void openRoom(code, false),
-    onBack: () => showMenu(),
+    onSubmit: (code, created, isPublic) => void openRoom(code, created, isPublic),
+    onCancel: () => showMenu(),
   });
 }
 
@@ -234,14 +430,19 @@ function showRoomEntry(): void {
  * the first and every rematch — runs inside this one Net via `rounds`. Nothing
  * here may call net.leave() except the trip back to the menu.
  */
-async function openRoom(code: string, created: boolean): Promise<void> {
+async function openRoom(code: string, created: boolean, isPublic: boolean): Promise<void> {
   leaveRoom();
   // A previous room may still be tearing down (Trystero defers it ~99ms).
   // Joining inside that window returns the dying room, so wait it out.
   await roomTeardown;
 
-  // Put the room code in the URL so the invite link carries it.
+  // Put the room code in the URL so the invite link carries it. The public flag
+  // stays OUT: it is the host's live choice, not a property of the code. Baked
+  // into an invite link it would survive the host flipping the room private, and
+  // every guest who forwarded the link would pass on a claim that is not true.
   setRoomInUrl(code);
+  roomCode = code;
+  roomPublic = created && isPublic;
 
   try {
     net = createNet(
@@ -266,9 +467,20 @@ async function openRoom(code: string, created: boolean): Promise<void> {
   rounds = createRounds({
     net,
     playerName: playerName(),
-    minPlayers: 2,
-    onRound: ({ seed, players, isHost }) => startRace(seed, players, isHost),
+    minPlayers: MIN_PLAYERS,
+    // Only the host's pick counts, and it travels frozen with the start — a mode
+    // each peer read from its own UI is a mode two peers can disagree about, and
+    // here that is two different courses. `pub` rides along so a guest can see
+    // that strangers may walk in; it is gossiped with presence, so it is live
+    // rather than a claim from join time.
+    roundOpts: () => ({ mode: modeId, pub: roomPublic }),
+    onRound: ({ seed, players, isHost, opts }) => startRace(seed, players, isHost, opts),
   });
+
+  listing = createListing(boardAccess);
+  // Player counts move, the host can flip the room private, and the host role
+  // itself can transfer mid-lobby. Poll one rule rather than hunt every edge.
+  listingTick = window.setInterval(syncListing, 1000);
 
   showLobby(code);
 }
@@ -283,18 +495,31 @@ function showLobby(code: string): void {
     net,
     rounds,
     roomCode: code,
-    minPlayers: 2,
-    maxPlayers: 6,
+    minPlayers: MIN_PLAYERS,
+    maxPlayers: MAX_PLAYERS,
+    // Only the host chooses; everyone else sees what they are about to play, so
+    // nobody is surprised by a nine-hole Gauntlet they did not pick.
+    modeSlot: () => (net!.isHost() ? modePicker() + visibilityPicker() : modeNote()),
+    onModeMount: () => {
+      wireModePicker(() => lobby?.repaint());
+      wireVisibility(() => lobby?.repaint());
+    },
   });
+  syncListing();
 }
 
 // ---- race ----
-function startRace(seed: number, roster: RoundPlayer[], _isHost: boolean): void {
+function startRace(seed: number, roster: RoundPlayer[], _isHost: boolean, opts: unknown): void {
   if (!net) return;
   lobby?.destroy();
   lobby = null;
+  // The race is starting, so the room comes off the list right now — not up to a
+  // tick later, and not "once someone notices". syncListing reads `lobby`, which
+  // is the null above.
+  syncListing();
   netGame?.destroy();
   netGame = null;
+  countdown?.cancel();
 
   // The roster arrives frozen from the host, identical bytes on every peer, so
   // everyone agrees on the field. If we are not in it we joined mid-start —
@@ -304,13 +529,18 @@ function startRace(seed: number, roster: RoundPlayer[], _isHost: boolean): void 
     return;
   }
 
+  // Course AND clock come from the host's mode, frozen into the start alongside
+  // the roster. modeOf() is what stops an unknown id off the wire from handing
+  // generateCourse an undefined hole count.
+  const m = modeOf((opts as { mode?: unknown } | undefined)?.mode);
+
   mode = 'race';
   courseSeed = seed;
-  holeCount = DEFAULT_HOLES;
+  playedMode = m;
   raceOver = false;
   selfFinished = false;
   lastSnap = null;
-  const course = generateCourse(seed, holeCount);
+  const course = generateCourse(seed, m.holes, m.tier);
   game = new GolfGame(course);
 
   const names: Record<string, string> = {};
@@ -318,7 +548,7 @@ function startRace(seed: number, roster: RoundPlayer[], _isHost: boolean): void 
 
   netGame = new NetGame(
     net!,
-    { totalHoles: holeCount, timeLimitMs: holeCount * 60000, names },
+    { totalHoles: m.holes, timeLimitMs: timeLimitMs(m), names },
     {
       onSnapshot: (snap) => onSnapshot(snap),
       onHostPromoted: () => showToast("You're the host now"),
@@ -329,13 +559,31 @@ function startRace(seed: number, roster: RoundPlayer[], _isHost: boolean): void 
   onPeerLeaveRoute = (id) => netGame?.onPeerLeave(id);
   onPeersRoute = (ids) => netGame?.onRoster(ids);
   netGame.onRoster(net!.peers());
-  netGame.start();
 
   buildGameScreen();
   resetKbAim();
   updateHud();
   syncProgress();
+
+  // Show the course behind the countdown, but hold the shot: the point is that
+  // everyone gets the same look at the field before it counts. `paused` is what
+  // freezes the sim and blocks input, and the loop still runs so the course is
+  // drawn rather than left blank.
+  paused = true;
   startLoop();
+  countdown = createCountdown({
+    root: content.querySelector('#game-screen')!,
+    sfx,
+    reducedMotion: reduced,
+    onDone: () => {
+      countdown = null;
+      paused = false;
+      // The round clock starts when the round does. netGame.start() is what
+      // spins up the host's keepalive tick, so starting it before the count
+      // would spend the first ~3.5s of everyone's race on the countdown.
+      netGame?.start();
+    },
+  });
 }
 
 function onSnapshot(snap: RaceSnapshot): void {
@@ -454,7 +702,7 @@ function onKey(e: KeyboardEvent): void {
     return;
   }
   if ((e.key === 'r' || e.key === 'R') && mode === 'solo') {
-    startSolo(courseSeed, holeCount);
+    startSolo(courseSeed, playedMode);
     return;
   }
   if (!game || !game.canShoot() || paused) return;
@@ -625,11 +873,11 @@ function showSoloResults(): void {
   stopLoop();
   const total = game!.totalStrokes;
   const par = game!.totalPar();
-  const prevBest = store.get<number | null>(`best-${holeCount}`, null);
+  const prevBest = store.get<number | null>(`best-${playedMode.id}`, null);
   const isNewBest = prevBest == null || total < prevBest;
-  if (isNewBest) store.set(`best-${holeCount}`, total);
+  if (isNewBest) store.set(`best-${playedMode.id}`, total);
   shell(soloResultsHTML(game!.results, par, isNewBest ? total : prevBest, isNewBest));
-  content.querySelector('#r-again')?.addEventListener('click', () => startSolo(courseSeed, holeCount));
+  content.querySelector('#r-again')?.addEventListener('click', () => startSolo(courseSeed, playedMode));
   content.querySelector('#r-share')?.addEventListener('click', shareCourse);
   content.querySelector('#r-menu')?.addEventListener('click', showMenu);
 }
@@ -638,7 +886,13 @@ async function shareCourse(): Promise<void> {
   const url = new URL(location.href);
   url.searchParams.delete('room');
   url.searchParams.set('seed', String(courseSeed));
-  url.searchParams.set('holes', String(holeCount));
+  // The MODE, not a hole count: the course is (seed, holes, tier), and a link
+  // carrying only the length would hand the recipient a different course — same
+  // number of holes, different fields — which is the one thing "play this exact
+  // course" must not do. `holes` is dropped so an older link's stale count
+  // cannot outlive the mode we are actually writing.
+  url.searchParams.delete('holes');
+  url.searchParams.set('mode', playedMode.id);
   const link = url.toString();
   const flashEl = content.querySelector('.share-flash') as HTMLElement | null;
   const shareData = { title: 'Gravity Golf', text: 'Play this exact course!', url: link };
@@ -671,7 +925,7 @@ function showRaceResults(snap: RaceSnapshot): void {
   netGame = null;
   rounds?.finish();
 
-  const pars = generateCourse(courseSeed, holeCount).map((h) => h.par);
+  const pars = generateCourse(courseSeed, playedMode.holes, playedMode.tier).map((h) => h.par);
   shell(raceResultsHTML(snap.standings, net?.selfId ?? '', pars));
   content.querySelector('#r-share')?.addEventListener('click', shareCourse);
   content.querySelector('#r-menu')?.addEventListener('click', () => showMenu());
@@ -744,7 +998,7 @@ function updateHud(): void {
   const parEl = content.querySelector('#hud-par');
   const midEl = content.querySelector('#hud-mid');
   const h = game.current();
-  if (holeEl) holeEl.textContent = `Hole ${Math.min(game.holeIndex + 1, holeCount)}/${holeCount}`;
+  if (holeEl) holeEl.textContent = `Hole ${Math.min(game.holeIndex + 1, playedMode.holes)}/${playedMode.holes}`;
   if (parEl) parEl.textContent = `Par ${h.par}`;
   if (midEl) {
     const throughPar = game.results.reduce((s, r) => s + (r.strokes - r.par), 0);
@@ -806,7 +1060,9 @@ function updateWaitingOverlay(snap: RaceSnapshot | null): void {
 
 // ---- pause / mute / toast ----
 function togglePause(): void {
-  if (!game || game.done || selfFinished) return;
+  // Never while the countdown is running: `paused` is what holds the field, so
+  // an early P would hand that player the first stroke before GO.
+  if (!game || game.done || selfFinished || countdown) return;
   paused = !paused;
   const ov = content.querySelector('#goverlay') as HTMLElement | null;
   if (!ov) return;
@@ -824,7 +1080,7 @@ function togglePause(): void {
     ov.querySelector('#pz-resume')?.addEventListener('click', togglePause);
     ov.querySelector('#pz-restart')?.addEventListener('click', () => {
       paused = false;
-      startSolo(courseSeed, holeCount);
+      startSolo(courseSeed, playedMode);
     });
     // showMenu() goes through leaveRoom(), which retires the NetGame and the
     // Rounds BEFORE the Net and awaits the leave. Dropping the Net on its own
@@ -894,20 +1150,29 @@ function boot(): void {
   const roomParam = roomCodeFromUrl();
   const url = new URL(location.href);
   const seedParam = url.searchParams.get('seed');
-  const holesParam = url.searchParams.get('holes');
 
   window.addEventListener('beforeunload', () => net?.leave());
 
   if (roomParam) {
     // Deep-linked invite — go straight to the lobby (consume the link once). We
-    // are the guest here, never the host: whoever sent the link already holds it.
-    void openRoom(roomParam, false);
+    // are the guest here, never the host: whoever sent the link already holds it,
+    // and it is their mode and their public/private choice that the room plays.
+    void openRoom(roomParam, false, false);
     return;
   }
   if (seedParam) {
-    const holes = holesParam ? Math.max(3, Math.min(18, parseInt(holesParam, 10) || DEFAULT_HOLES)) : DEFAULT_HOLES;
+    // A shared course link. modeOf() validates the id the same way the wire does
+    // — a hand-edited ?mode=lol falls back to Classic rather than reaching the
+    // generator. `holes` is the pre-mode link format, honoured so links already
+    // sent out still open a course of the right length.
+    const holesParam = url.searchParams.get('holes');
+    const m = url.searchParams.has('mode')
+      ? modeOf(url.searchParams.get('mode'))
+      : holesParam
+        ? { ...modeOf(DEFAULT_MODE), holes: Math.max(3, Math.min(18, parseInt(holesParam, 10) || modeOf(DEFAULT_MODE).holes)) }
+        : modeOf(DEFAULT_MODE);
     const seedNum = Number(seedParam);
-    startSolo(Number.isFinite(seedNum) && seedParam !== '' ? seedNum : seedParam, holes);
+    startSolo(Number.isFinite(seedNum) && seedParam !== '' ? seedNum : seedParam, m);
     return;
   }
   showMenu();
