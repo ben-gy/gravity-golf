@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://gravity-golf.benrichardson.dev/sitemap.xml
