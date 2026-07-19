@@ -13,7 +13,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { NetGame } from '../src/net-game';
-import type { Net, PeerId } from '../src/engine/net';
+import type { Net, PeerId } from '@ben-gy/game-engine/net';
 import { emptyProgress, type ProgWire, type RaceSnapshot } from '../src/game/race';
 
 /** A Net stand-in with real fan-out + off(), mirroring engine/net.ts. */
@@ -30,7 +30,22 @@ function mockNet(selfId: PeerId, peers: PeerId[], isHost: boolean) {
     // A race only ever starts from a settled room (see host-election.test.ts), so
     // the NetGame never sees an unsettled Net.
     hostSettled: () => true,
+    hostEpoch: () => 1,
     count: () => roster.length,
+    // The roster is fixed for the life of a race here, so there is nothing to
+    // fan out — but the unsubscribe must still be real, since NetGame.destroy()
+    // calling it is the whole subject of this file.
+    onPeersChange: () => () => {},
+    takeover: () => {},
+    netDiag: () => ({
+      selfId,
+      host: isHost ? selfId : roster[0],
+      epoch: 1,
+      settled: true,
+      peers: roster,
+      relaySockets: {},
+      turn: false,
+    }),
     channel<T>(name: string, onReceive: (d: T, from: PeerId) => void) {
       if (!chans.has(name)) chans.set(name, new Set());
       const h = onReceive as (d: unknown, from: PeerId) => void;

@@ -7,7 +7,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { hardenViewport, type Unharden } from '../src/engine/mobile';
+import { hardenViewport, type Unharden } from '@ben-gy/game-engine/mobile';
 
 let unharden: Unharden | null = null;
 

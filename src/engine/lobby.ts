@@ -13,11 +13,11 @@
  * about who was in the field.
  */
 
-import type { Net, PeerId } from './net';
+import type { Net, PeerId } from '@ben-gy/game-engine/net';
 // Types only. Importing the noticeboard's implementation here would drag a mesh
 // of strangers into every screen that shows a room code — see BoardAccess.
-import type { PublicRoom, RoomAd } from './noticeboard';
-import type { Rounds } from './rematch';
+import type { PublicRoom, RoomAd } from '@ben-gy/game-engine/noticeboard';
+import type { Rounds } from '@ben-gy/game-engine/rematch';
 
 export interface LobbyPlayer {
   id: PeerId;
@@ -433,10 +433,35 @@ export function createRoomEntry(config: RoomEntryConfig): { destroy: () => void 
   };
 }
 
+/**
+ * How long a peer sits alone and unsettled before the lobby offers to host.
+ *
+ * The engine's net.ts deliberately never self-elects on a roster of one: silence
+ * is evidence of NO MESH, not of an empty room, and a peer that assumed
+ * otherwise became a phantom host that later walked into a live room and stole
+ * it. (The old vendored net.ts did exactly that after 2.5s — it is the reason a
+ * second player joining could kick everyone out.)
+ *
+ * But that invariant leaves a real player with nowhere to go: someone who opens
+ * an invite link after the host has left is alone, unsettled, and would spin
+ * forever. So net.ts hands the escape hatch to the lobby, where it belongs —
+ * hosting an orphaned room is a UX decision the player makes, never one the
+ * transport makes on their behalf.
+ */
+const OFFER_HOST_MS = 15000;
+
 export function createLobby(config: LobbyConfig): { destroy: () => void; repaint: () => void } {
   const { net, rounds, container } = config;
   const minPlayers = config.minPlayers ?? 2;
   const maxPlayers = config.maxPlayers ?? 8;
+  const openedAt = Date.now();
+  /** Set once the player accepts the offer, so it is never re-offered. */
+  let tookOver = false;
+
+  /** Alone, unsettled, and waiting long enough that we should offer to host. */
+  function shouldOfferHost(): boolean {
+    return !tookOver && !net.hostSettled() && net.count() === 1 && Date.now() - openedAt > OFFER_HOST_MS;
+  }
 
   // The lobby renders; it does not decide. Presence, readiness, quorum and the
   // start signal all live in rematch.ts, so the first race and every rematch
@@ -516,7 +541,13 @@ export function createLobby(config: LobbyConfig): { destroy: () => void; repaint
   function render(): void {
     if (rounds.state().phase === 'playing') return;
     const ps = players();
-    const key = JSON.stringify([ps, canStart(), net.hostSettled(), config.modeSlot?.() ?? '']);
+    const key = JSON.stringify([
+      ps,
+      canStart(),
+      net.hostSettled(),
+      shouldOfferHost(),
+      config.modeSlot?.() ?? '',
+    ]);
     if (key === painted) return;
     painted = key;
     const link = inviteLink(config.roomCode);
@@ -542,7 +573,12 @@ export function createLobby(config: LobbyConfig): { destroy: () => void; repaint
             .join('')}
         </ul>
         ${
-          !net.hostSettled()
+          shouldOfferHost()
+            ? `<div class="lobby-searching lobby-offer">
+                 <span>Nobody's here yet. If you minted this code, you can host the room.</span>
+                 <button class="lobby-btn lobby-host" type="button">Host this room</button>
+               </div>`
+            : !net.hostSettled()
             ? `<div class="lobby-searching"><span class="spinner" aria-hidden="true"></span>
                  <span>Connecting to the room…</span></div>`
             : ps.length < minPlayers
@@ -570,6 +606,13 @@ export function createLobby(config: LobbyConfig): { destroy: () => void; repaint
       </div>`;
 
     config.onModeMount?.();
+    container.querySelector('.lobby-host')?.addEventListener('click', () => {
+      tookOver = true;
+      // A NEW term, so if a real incumbent surfaces later its higher epoch wins
+      // and we stand down — the offer can never re-create the phantom host.
+      net.takeover();
+      render();
+    });
     container.querySelector('.lobby-share')?.addEventListener('click', () => void share());
     container.querySelector('.lobby-ready')?.addEventListener('click', toggleReady);
     container.querySelector('.lobby-start')?.addEventListener('click', start);

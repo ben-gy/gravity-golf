@@ -6,7 +6,7 @@
 import { FIELD_W, FIELD_H, BALL_R, type Vec } from './game/physics';
 import type { GolfGame } from './game/golf';
 import type { Fx } from './fx';
-import { makeRng } from './engine/rng';
+import { makeRng } from '@ben-gy/game-engine/rng';
 
 export const PAL = {
   bg0: '#0a0e1a',
