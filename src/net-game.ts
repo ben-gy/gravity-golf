@@ -16,7 +16,7 @@
  * quietly hold a second opinion and hand it authority.
  */
 
-import type { Net } from './engine/net';
+import type { Net } from '@ben-gy/game-engine/net';
 import {
   RaceSession,
   encodeProgress,

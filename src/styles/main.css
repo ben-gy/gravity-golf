@@ -607,6 +607,15 @@ body {
   color: var(--muted);
   font-size: 13px;
 }
+/* The "nobody's here — host this room?" offer. Stacked rather than inline: it
+   carries a sentence and a button, not a spinner and three words, and on a
+   phone the button has to be a full-width tap target like every other one. */
+.lobby-offer {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  text-align: left;
+}
 .lobby-actions {
   display: flex;
   flex-direction: column;

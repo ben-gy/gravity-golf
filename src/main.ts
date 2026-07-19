@@ -11,13 +11,14 @@ mountFeedback();
 
 import './styles/mobile.css';
 import './styles/main.css';
-import { hardenViewport } from './engine/mobile';
-import { createLoop, type Loop } from './engine/loop';
+import { hardenViewport } from '@ben-gy/game-engine/mobile';
+import { createLoop, type Loop } from '@ben-gy/game-engine/loop';
 import { createSfx } from './engine/sound';
-import { createStore } from './engine/storage';
-import { newSeed } from './engine/rng';
-import { createNet, type Net } from './engine/net';
-import { createRounds, type Rounds } from './engine/rematch';
+import { createStore } from '@ben-gy/game-engine/storage';
+import { newSeed } from '@ben-gy/game-engine/rng';
+import { createNet, roomAppId, setTurnConfig, type Net } from '@ben-gy/game-engine/net';
+import { getTurnConfig } from '@ben-gy/game-engine/turn';
+import { createRounds, type Rounds } from '@ben-gy/game-engine/rematch';
 import {
   clearRoomInUrl,
   createLobby,
@@ -29,7 +30,7 @@ import {
   type BoardAccess,
   type Listing,
 } from './engine/lobby';
-import { createNoticeboard, type Noticeboard, type PublicRoom } from './engine/noticeboard';
+import { createNoticeboard, type Noticeboard, type PublicRoom } from '@ben-gy/game-engine/noticeboard';
 import { createCountdown } from './countdown';
 import { DEFAULT_MODE, MODE_LIST, modeOf, timeLimitMs, type Mode, type ModeId } from './modes';
 import { generateCourse } from './game/course';
@@ -38,7 +39,7 @@ import { type Vec } from './game/physics';
 import { Fx } from './fx';
 import { computeView, screenToWorld, draw, PAL, type View, type AimView } from './render';
 import { NetGame } from './net-game';
-import type { RoundPlayer } from './engine/rematch';
+import type { RoundPlayer } from '@ben-gy/game-engine/rematch';
 import type { RaceSnapshot } from './game/race';
 import {
   FOOTER_HTML,
@@ -52,6 +53,15 @@ import {
 } from './ui';
 
 const APP_ID = 'gravity-golf';
+/**
+ * The signaling namespace for every mesh this page opens. `roomAppId()` folds
+ * the engine's wire-protocol revision into the slug, so a player on a cached
+ * old build lands in a different namespace and simply never sees us — honest,
+ * and far better than half-connecting and desyncing. It is deliberately NOT
+ * APP_ID: that stays the raw slug so localStorage keys (and everyone's saved
+ * bests) survive a protocol bump.
+ */
+const ROOM_APP_ID = roomAppId(APP_ID);
 const MIN_PLAYERS = 2;
 const MAX_PLAYERS = 6;
 const MAX_DRAG = 46; // world units for full power
@@ -62,6 +72,29 @@ const CELEBRATE_MS = 1.15; // seconds of sink celebration before advancing
 // Before anything renders: iOS ignores the viewport meta's user-scalable=no, so
 // a double-tap or a pinch will zoom a live course and there is no way back out.
 hardenViewport();
+
+/**
+ * TURN credentials, fetched the moment the page boots — before any mesh exists.
+ *
+ * Trystero pre-builds ONE global pool of peer connections from whichever
+ * joinRoom() fires FIRST on the page, and every later room draws its outbound
+ * offers from that pool. So if the public-rooms noticeboard opens first without
+ * TURN, the game room's *initiating* half stays STUN-only no matter what the
+ * game room asks for — which is exactly the half a phone on carrier-grade NAT
+ * needs relayed, and it fails for only about half of all pairs, making it
+ * miserable to diagnose. Hence: one fetch, at boot, before either mesh.
+ *
+ * Awaited at every mesh site rather than merely fired-and-forgotten, so the
+ * ordering is guaranteed instead of likely. That costs nothing in practice —
+ * getTurnConfig() is sessionStorage-cached, times out at 3s, and fails open to
+ * an empty list (i.e. the old STUN-only behaviour), so it can never block or
+ * fail a join. Starting it here rather than at join time means it has almost
+ * always resolved before the player has finished reading the menu.
+ */
+const turnReady: Promise<void> = getTurnConfig().then(
+  (servers) => setTurnConfig(servers),
+  () => setTurnConfig([]),
+);
 
 const store = createStore(APP_ID);
 const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -238,8 +271,12 @@ let boardQueue: Promise<void> = Promise.resolve();
 
 function onBoard(then: () => void): Promise<void> {
   boardQueue = boardQueue
-    .then(() => {
-      board ??= createNoticeboard({ appId: APP_ID, onRooms: (r) => boardRooms?.(r) });
+    .then(async () => {
+      // The board is often the first mesh on the page (menu → browse, before
+      // any room is joined), so TURN has to be in force before it opens or it
+      // poisons the shared offer pool for the game room that follows.
+      await turnReady;
+      board ??= createNoticeboard({ appId: ROOM_APP_ID, onRooms: (r) => boardRooms?.(r) });
       then();
     })
     .then(
@@ -440,6 +477,10 @@ async function openRoom(code: string, created: boolean, isPublic: boolean): Prom
   // A previous room may still be tearing down (Trystero defers it ~99ms).
   // Joining inside that window returns the dying room, so wait it out.
   await roomTeardown;
+  // Started at boot, so on the deep-link path (the only one that reaches here
+  // without the player passing through the menu) this is the guarantee that
+  // TURN is in force before the very first mesh, not merely on its way.
+  await turnReady;
 
   // Put the room code in the URL so the invite link carries it. The public flag
   // stays OUT: it is the host's live choice, not a property of the code. Baked
@@ -454,7 +495,7 @@ async function openRoom(code: string, created: boolean, isPublic: boolean): Prom
       // `created` is the difference between minting this code and walking into
       // someone else's room. Only the minter may host on arrival; a guest waits
       // to hear from the incumbent instead of racing it for the role.
-      { appId: APP_ID, roomId: code, claimHost: created },
+      { appId: ROOM_APP_ID, roomId: code, claimHost: created },
       {
         onHostChange: (_id, isHost) => onHostChangeRoute(isHost),
         onPeerLeave: (id) => onPeerLeaveRoute(id),

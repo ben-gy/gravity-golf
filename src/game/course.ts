@@ -11,7 +11,7 @@
  * so an unwinnable / trapped hole can't be generated.
  */
 
-import { makeRng, randInt, randFloat, type Rng } from '../engine/rng';
+import { makeRng, randInt, randFloat, type Rng } from '@ben-gy/game-engine/rng';
 import {
   FIELD_W,
   FIELD_H,
