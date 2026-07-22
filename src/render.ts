@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Ben Richardson — https://benrichardson.dev
+// Additional terms under AGPL-3.0 section 7(b) apply; see ADDITIONAL-TERMS.md.
 /**
  * render.ts — Canvas 2D rendering of the gravity-golf world. Draws in CSS-pixel
  * space (main.ts applies the devicePixelRatio transform before calling draw).

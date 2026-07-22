@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Ben Richardson — https://benrichardson.dev
+// Additional terms under AGPL-3.0 section 7(b) apply; see ADDITIONAL-TERMS.md.
 /**
  * race.ts — host-authoritative race state for live P2P play, deliberately free
  * of any network or DOM so it's fully unit-testable (see tests/race.test.ts).

@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "description": "Slingshot your ball through a field of planets — bend it around gravity into the hole in as few shots as you can.",
+  "license": "AGPL-3.0-or-later",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
